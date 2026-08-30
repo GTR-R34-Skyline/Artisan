@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { ArrowUpRight, Check, Loader2 } from 'lucide-react';
+import { NoiseBackground } from './ui/noise-background';
 
 export const Eyebrow: React.FC<{ children: React.ReactNode; light?: boolean }> = ({ children, light = false }) => (
   <p className={`eyebrow text-[10px] font-semibold uppercase tracking-[0.22em] ${light ? 'text-white/65' : 'text-stone-500'}`}>
