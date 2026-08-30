@@ -1,6 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { ArrowUpRight, Check, Loader2 } from 'lucide-react';
-import { NoiseBackground } from './ui/noise-background';
 
 export const Eyebrow: React.FC<{ children: React.ReactNode; light?: boolean }> = ({ children, light = false }) => (
   <p className={`eyebrow text-[10px] font-semibold uppercase tracking-[0.22em] ${light ? 'text-white/65' : 'text-stone-500'}`}>
@@ -66,16 +65,14 @@ export const Button: React.FC<{
   };
 
   return (
-    <NoiseBackground containerClassName={className.includes('w-full') ? 'w-full' : ''}>
-      <button
-        type={type}
-        onClick={onClick}
-        disabled={disabled}
-        className={`group relative inline-flex min-h-11 items-center justify-center gap-3 rounded-full px-5 py-3 text-xs font-semibold uppercase tracking-[0.16em] transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${styles[variant]} ${className}`}
-      >
-        {children}
-      </button>
-    </NoiseBackground>
+    <button
+      type={type}
+      onClick={onClick}
+      disabled={disabled}
+      className={`group relative inline-flex min-h-11 items-center justify-center gap-3 rounded-full px-5 py-3 text-xs font-semibold uppercase tracking-[0.16em] transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${styles[variant]} ${className}`}
+    >
+      {children}
+    </button>
   );
 };
 
