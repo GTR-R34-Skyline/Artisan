@@ -9,6 +9,11 @@ export interface ProfileReasoningResult {
   nextQuestion: string;
 }
 
+export interface GeminiTurnContext {
+  turnId: string;
+  clientTurnId?: string;
+}
+
 const nullable = (type: 'string' | 'number') => ({
   anyOf: [{ type }, { type: 'null' }],
 });
@@ -109,34 +114,7 @@ ${JSON.stringify(currentProfile)}
 NEW TRANSCRIPT:
 ${JSON.stringify(transcript)}`;
 
-export const reasonAboutProfile = async (
-  currentProfile: ArtisanProfileState,
-  transcript: string,
-  selectedLanguage: SupportedLanguageCode,
-): Promise<ProfileReasoningResult> => {
-  const apiKey = Deno.env.get('GEMINI_API_KEY');
-  if (!apiKey) throw new Error('Profile reasoning is not configured on the server.');
-
-  const model = Deno.env.get('GEMINI_REASONING_MODEL') || 'gemini-3.6-flash';
-  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      contents: [{ role: 'user', parts: [{ text: buildPrompt(currentProfile, transcript, selectedLanguage) }] }],
-      generationConfig: {
-        temperature: 0.1,
-        responseMimeType: 'application/json',
-        responseJsonSchema: responseSchema,
-      },
-    }),
-  });
-
-  if (!response.ok) throw new Error(`Profile reasoning failed with status ${response.status}.`);
-  const payload = await response.json() as {
-    candidates?: Array<{ content?: { parts?: Array<{ text?: unknown }> } }>;
-  };
-  const text = payload.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (typeof text !== 'string') throw new Error('Profile reasoning returned no structured result.');
+const parseReasoningPayload = (text: string): ProfileReasoningResult => {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
@@ -151,4 +129,174 @@ export const reasonAboutProfile = async (
     continueConversation: parsed.continue_conversation,
     nextQuestion: parsed.next_question,
   };
+};
+
+const logGeminiRequestStart = (
+  turn: GeminiTurnContext,
+  model: string,
+  mode: 'stream' | 'batch',
+  transcriptChars: number,
+): void => {
+  console.info('[profile-gemini] request_start', {
+    turnId: turn.turnId,
+    clientTurnId: turn.clientTurnId ?? null,
+    model,
+    mode,
+    transcriptChars,
+    at: Date.now(),
+  });
+};
+
+const logGeminiResponse = (
+  turn: GeminiTurnContext,
+  model: string,
+  mode: 'stream' | 'batch',
+  status: number,
+  response: Response,
+  startedAt: number,
+): void => {
+  console.info('[profile-gemini] request_response', {
+    turnId: turn.turnId,
+    clientTurnId: turn.clientTurnId ?? null,
+    model,
+    mode,
+    status,
+    elapsedMs: Date.now() - startedAt,
+    retryAfter: response.headers.get('retry-after'),
+    rateLimitRemaining: response.headers.get('x-ratelimit-remaining'),
+    googleQuotaUser: response.headers.get('x-goog-quota-user'),
+  });
+};
+
+const assertGeminiOk = async (
+  turn: GeminiTurnContext,
+  model: string,
+  mode: 'stream' | 'batch',
+  response: Response,
+  startedAt: number,
+): Promise<void> => {
+  if (response.ok) return;
+  logGeminiResponse(turn, model, mode, response.status, response, startedAt);
+  let detail = '';
+  try {
+    const body = await response.text();
+    if (body) detail = body.slice(0, 240);
+  } catch {
+    // ignore
+  }
+  console.error('[profile-gemini] request_failed', {
+    turnId: turn.turnId,
+    clientTurnId: turn.clientTurnId ?? null,
+    model,
+    mode,
+    status: response.status,
+    detail: detail || null,
+  });
+  throw new Error(`Profile reasoning failed with status ${response.status}.`);
+};
+
+export async function* streamReasonAboutProfileTokens(
+  currentProfile: ArtisanProfileState,
+  transcript: string,
+  selectedLanguage: SupportedLanguageCode,
+  turn: GeminiTurnContext,
+): AsyncGenerator<string, ProfileReasoningResult, void> {
+  const apiKey = Deno.env.get('GEMINI_API_KEY');
+  if (!apiKey) throw new Error('Profile reasoning is not configured on the server.');
+
+  const model = Deno.env.get('GEMINI_REASONING_MODEL') || 'gemini-3.6-flash';
+  const startedAt = Date.now();
+  logGeminiRequestStart(turn, model, 'stream', transcript.length);
+
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${apiKey}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ role: 'user', parts: [{ text: buildPrompt(currentProfile, transcript, selectedLanguage) }] }],
+        generationConfig: {
+          temperature: 0.1,
+          responseMimeType: 'application/json',
+          responseJsonSchema: responseSchema,
+        },
+      }),
+    },
+  );
+
+  await assertGeminiOk(turn, model, 'stream', response, startedAt);
+  logGeminiResponse(turn, model, 'stream', response.status, response, startedAt);
+  if (!response.body) throw new Error('Profile reasoning stream returned no body.');
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let jsonText = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('data:')) continue;
+      const payloadText = trimmed.slice(5).trim();
+      if (!payloadText || payloadText === '[DONE]') continue;
+      let payload: {
+        candidates?: Array<{ content?: { parts?: Array<{ text?: unknown }> } }>;
+      };
+      try {
+        payload = JSON.parse(payloadText);
+      } catch {
+        continue;
+      }
+      const piece = payload.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (typeof piece === 'string' && piece.length) {
+        jsonText += piece;
+        yield piece;
+      }
+    }
+  }
+
+  if (!jsonText.trim()) throw new Error('Profile reasoning returned no structured result.');
+  return parseReasoningPayload(jsonText);
+}
+
+export const reasonAboutProfile = async (
+  currentProfile: ArtisanProfileState,
+  transcript: string,
+  selectedLanguage: SupportedLanguageCode,
+  turn: GeminiTurnContext,
+): Promise<ProfileReasoningResult> => {
+  const apiKey = Deno.env.get('GEMINI_API_KEY');
+  if (!apiKey) throw new Error('Profile reasoning is not configured on the server.');
+
+  const model = Deno.env.get('GEMINI_REASONING_MODEL') || 'gemini-3.6-flash';
+  const startedAt = Date.now();
+  logGeminiRequestStart(turn, model, 'batch', transcript.length);
+
+  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{ role: 'user', parts: [{ text: buildPrompt(currentProfile, transcript, selectedLanguage) }] }],
+      generationConfig: {
+        temperature: 0.1,
+        responseMimeType: 'application/json',
+        responseJsonSchema: responseSchema,
+      },
+    }),
+  });
+
+  await assertGeminiOk(turn, model, 'batch', response, startedAt);
+  logGeminiResponse(turn, model, 'batch', response.status, response, startedAt);
+  const payload = await response.json() as {
+    candidates?: Array<{ content?: { parts?: Array<{ text?: unknown }> } }>;
+  };
+  const text = payload.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (typeof text !== 'string') throw new Error('Profile reasoning returned no structured result.');
+  return parseReasoningPayload(text);
 };

@@ -28,6 +28,10 @@ export interface ProfileConversationRequest {
   audioMimeType?: string;
   profileState: Partial<ArtisanProfileState>;
   publicApplication?: boolean;
+  stream?: boolean;
+  preferClientTranscript?: boolean;
+  /** Client-generated ID to correlate one speech turn with one reasoning request. */
+  clientTurnId?: string;
 }
 
 export interface ProfileConversationResponse {

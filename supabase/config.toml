@@ -424,6 +424,16 @@ enabled = true
 verify_jwt = true
 entrypoint = "./functions/marketplace-checkout/index.ts"
 
+[functions.profile-conversation]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/profile-conversation/index.ts"
+
+[functions.deepgram-stream-token]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/deepgram-stream-token/index.ts"
+
 [functions.vendor-commerce]
 enabled = true
 verify_jwt = true

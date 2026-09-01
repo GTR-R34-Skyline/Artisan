@@ -6,6 +6,9 @@ import { useAuth } from '../auth/useAuthHook';
 import { isVendorDashboardReady } from '../auth/vendorDashboardAccess';
 import { supabase } from '../lib/supabase';
 import { ProfileConversationService } from '../services/profileConversation.service';
+import { ProgressiveAudioPlayer } from '../services/progressiveAudioPlayback';
+import { DeepgramStreamingStt } from '../services/deepgramStreamingStt';
+import { VoiceTurnTimer } from '../services/profileVoiceTiming';
 import {
   ArtisanProfileState,
   createInitialProfileState,
@@ -61,14 +64,16 @@ const VendorOnboarding: React.FC = () => {
   const [editing, setEditing] = useState(false);
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
-  const recorderRef = useRef<MediaRecorder | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const chunksRef = useRef<Blob[]>([]);
   const startedAtRef = useRef(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const startedRef = useRef(false);
   const hydratedRef = useRef(false);
+  const sttRef = useRef<DeepgramStreamingStt | null>(null);
+  const turnGenerationRef = useRef(0);
+  const stopInFlightRef = useRef(false);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const audioPlayerRef = useRef(new ProgressiveAudioPlayer());
 
   useEffect(() => {
     if (!profile || hydratedRef.current) return;
@@ -95,41 +100,76 @@ const VendorOnboarding: React.FC = () => {
   }, [navigate, profile, user?.email]);
 
   useEffect(() => () => {
-    recorderRef.current?.stop();
-    streamRef.current?.getTracks().forEach((track) => track.stop());
+    sttRef.current?.abort();
+    abortControllerRef.current?.abort();
     if (timerRef.current) clearInterval(timerRef.current);
     audioRef.current?.pause();
+    audioPlayerRef.current.reset(turnGenerationRef.current + 1);
   }, []);
 
   const submitTranscript = useCallback(async (
-    payload: { transcript?: string; audioBlob?: Blob },
+    payload: { transcript?: string; preferClientTranscript?: boolean },
     language: SupportedLanguageCode,
   ) => {
-    if (!payload.transcript?.trim() && !payload.audioBlob) return;
+    if (!payload.transcript?.trim()) return;
+
+    const turnGeneration = turnGenerationRef.current + 1;
+    turnGenerationRef.current = turnGeneration;
+    const clientTurnId = crypto.randomUUID();
+    const previousController = abortControllerRef.current;
+    if (previousController) {
+      console.info('[profile-voice] client_turn_superseded', {
+        clientTurnId,
+        turnGeneration,
+        previousAborted: true,
+      });
+      previousController.abort();
+    }
+    const abortController = new AbortController();
+    abortControllerRef.current = abortController;
+    audioPlayerRef.current.reset(turnGeneration);
+    audioRef.current?.pause();
+
     setStatus('processing');
     setError('');
+    const timer = new VoiceTurnTimer();
+
     try {
-      const request: Parameters<typeof ProfileConversationService.sendTurn>[0] = {
+      const request: Parameters<typeof ProfileConversationService.sendTurnStreaming>[0] = {
         selectedLanguage: language,
         profileState,
+        stream: true,
+        transcript: payload.transcript.trim(),
+        preferClientTranscript: true,
+        clientTurnId,
       };
-      if (payload.audioBlob) {
-        const bytes = new Uint8Array(await payload.audioBlob.arrayBuffer());
-        let binary = '';
-        for (let index = 0; index < bytes.length; index += 0x8000) {
-          binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
-        }
-        request.audioBase64 = btoa(binary);
-        request.audioMimeType = payload.audioBlob.type || 'audio/webm';
-      } else {
-        request.transcript = payload.transcript?.trim();
-      }
-      const response = await ProfileConversationService.sendTurn(request);
+
+      timer.mark('gemini_request_sent', { clientTurnId, turnGeneration });
+      const response = await ProfileConversationService.sendTurnStreaming(
+        request,
+        {
+          onTranscript: (transcript) => {
+            setLastTranscript(transcript);
+            setInterimTranscript('');
+          },
+          onAssistantText: (text) => setAssistantMessage(text),
+          onAudioChunk: (chunk) => {
+            audioPlayerRef.current.enqueue(chunk.audioBase64, chunk.audioMimeType, chunk.index, turnGeneration);
+          },
+          onError: (message, stage) => {
+            if (stage !== 'tts') setError(message);
+          },
+        },
+        abortController.signal,
+      );
+
+      if (turnGeneration !== turnGenerationRef.current) return;
+
       const nextState = mergeProfileState(profileState, response, language);
       setProfileState(nextState);
       setLastTranscript(response.transcript || payload.transcript?.trim() || '');
       setInterimTranscript('');
-      setAssistantMessage(response.assistantMessage);
+      setAssistantMessage(response.assistantMessage || assistantMessage);
       if (response.emptyTranscript) {
         setStatus('idle');
         return;
@@ -141,74 +181,98 @@ const VendorOnboarding: React.FC = () => {
       } else {
         setStatus(response.conversationComplete ? 'review' : 'asking_followup');
       }
-      if (response.audioBase64) {
-        const audioBytes = Uint8Array.from(atob(response.audioBase64), (character) => character.charCodeAt(0));
-        const audioUrl = URL.createObjectURL(new Blob([audioBytes], { type: response.audioMimeType || 'audio/mpeg' }));
-        audioRef.current?.pause();
-        const audio = new Audio(audioUrl);
-        audioRef.current = audio;
-        audio.onended = () => URL.revokeObjectURL(audioUrl);
-        audio.play().catch(() => setError('Response audio is ready. Tap the microphone to continue.'));
-      }
       sessionStorage.setItem('artisan_onboarding_state', JSON.stringify(nextState));
+      await audioPlayerRef.current.waitForIdle(turnGeneration);
+      timer.mark('turn_complete');
     } catch (conversationError) {
+      if (turnGeneration !== turnGenerationRef.current) return;
       setStatus('manual');
       setShowManual(true);
       setError(conversationError instanceof Error ? conversationError.message : 'We could not understand that. You can type your answer instead.');
+    } finally {
+      if (abortControllerRef.current === abortController) abortControllerRef.current = null;
     }
-  }, [profileState]);
+  }, [assistantMessage, profileState]);
 
-  const clearRecording = useCallback(() => {
-    streamRef.current?.getTracks().forEach((track) => track.stop());
-    streamRef.current = null;
-    recorderRef.current = null;
+  const clearRecordingTimer = useCallback(() => {
     if (timerRef.current) clearInterval(timerRef.current);
     timerRef.current = null;
   }, []);
 
-  const stopListeningAndSubmit = useCallback(() => {
-    const recorder = recorderRef.current;
-    if (!recorder) return;
-    recorder.onstop = () => {
+  const clearRecording = useCallback(() => {
+    sttRef.current?.abort();
+    sttRef.current = null;
+    clearRecordingTimer();
+  }, [clearRecordingTimer]);
+
+  const stopListeningAndSubmit = useCallback(async () => {
+    if (stopInFlightRef.current) return;
+    const stt = sttRef.current;
+    if (!stt) return;
+
+    stopInFlightRef.current = true;
+    clearRecordingTimer();
+
+    try {
+      setStatus('processing');
       const durationSec = Math.max(1, Math.round((Date.now() - startedAtRef.current) / 1000));
-      const audioBlob = new Blob(chunksRef.current, { type: recorder.mimeType || 'audio/webm' });
-      clearRecording();
+      const speechResult = await stt.stop();
+      sttRef.current = null;
       startedRef.current = false;
+
       if (durationSec > MAX_RECORDING_SECONDS) {
         setStatus('idle');
         setError(`Please keep each response under ${MAX_RECORDING_SECONDS} seconds.`);
         return;
       }
-      if (selectedLanguage) void submitTranscript({ audioBlob }, selectedLanguage);
-    };
-    recorder.stop();
-  }, [clearRecording, selectedLanguage, submitTranscript]);
+
+      if (!speechResult.transcript.trim()) {
+        setStatus('idle');
+        setError('We could not hear anything. Please try speaking again.');
+        return;
+      }
+
+      if (selectedLanguage) {
+        setLastTranscript(speechResult.transcript);
+        setInterimTranscript('');
+        void submitTranscript({ transcript: speechResult.transcript, preferClientTranscript: true }, selectedLanguage);
+      }
+    } finally {
+      stopInFlightRef.current = false;
+    }
+  }, [clearRecordingTimer, selectedLanguage, submitTranscript]);
 
   const startListening = useCallback(async (language = selectedLanguage) => {
     if (!language) return;
-    if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
+    if (!navigator.mediaDevices?.getUserMedia) {
       setStatus('manual');
       setShowManual(true);
       setError('Voice recording is unavailable in this browser. You can continue by typing below.');
       return;
     }
     setInterimTranscript('');
+    setLastTranscript('');
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const recorder = new MediaRecorder(stream);
-      chunksRef.current = [];
-      streamRef.current = stream;
-      recorderRef.current = recorder;
       startedAtRef.current = Date.now();
-      recorder.ondataavailable = (event) => {
-        if (event.data.size > 0) chunksRef.current.push(event.data);
-      };
-      recorder.start();
+      const stt = new DeepgramStreamingStt(
+        language,
+        ({ finalized, interim }) => {
+          setLastTranscript(finalized);
+          setInterimTranscript(interim);
+        },
+        (message) => setError(message),
+      );
+      sttRef.current = stt;
+      await stt.start();
       startedRef.current = true;
       setStatus('listening');
+
       timerRef.current = setInterval(() => {
         const seconds = Math.floor((Date.now() - startedAtRef.current) / 1000);
-        if (seconds >= MAX_RECORDING_SECONDS) stopListeningAndSubmit();
+        if (seconds >= MAX_RECORDING_SECONDS) {
+          clearRecordingTimer();
+          void stopListeningAndSubmit();
+        }
       }, 250);
     } catch (recordingError) {
       clearRecording();
@@ -216,7 +280,7 @@ const VendorOnboarding: React.FC = () => {
       setShowManual(true);
       setError(recordingError instanceof Error ? recordingError.message : 'Microphone permission is required.');
     }
-  }, [clearRecording, selectedLanguage, stopListeningAndSubmit]);
+  }, [clearRecording, clearRecordingTimer, selectedLanguage, stopListeningAndSubmit]);
 
   useEffect(() => {
     if (selectedLanguage && !startedRef.current && status === 'idle' && !lastTranscript) {
