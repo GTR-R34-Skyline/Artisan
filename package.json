@@ -8,7 +8,10 @@
     "dev:server": "node server.js",
     "build": "vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:reviews": "node scripts/test-product-reviews.mjs",
+    "test:checkout": "node scripts/test-mock-checkout.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.57.4",

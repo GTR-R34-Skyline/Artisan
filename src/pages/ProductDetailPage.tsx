@@ -1,16 +1,20 @@
 import React, { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { ArrowLeft, ArrowUpRight } from 'lucide-react';
-import { EmptyState, Eyebrow, ImageFrame, LoadingState, Reveal, StatusLabel } from '../components/DesignSystem';
+import { ProductReviews } from '../components/ProductReviews';
+import { Button, EmptyState, Eyebrow, ImageFrame, LoadingState, Reveal, StatusLabel } from '../components/DesignSystem';
+import { useCart } from '../context/CartContext';
 import { getMarketplaceListing } from '../services/marketplace.service';
 import { getProductDescription, getProductImage, getProductPrice, getProductTitle, MarketplaceListing } from '../types/marketplace';
 
 const ProductDetailPage: React.FC = () => {
   const { productId } = useParams<{ productId: string }>();
   const navigate = useNavigate();
+  const { addListing } = useCart();
   const [listing, setListing] = useState<MarketplaceListing | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [added, setAdded] = useState(false);
 
   useEffect(() => {
     if (!productId) return;
@@ -71,13 +75,26 @@ const ProductDetailPage: React.FC = () => {
           </div>
 
           <div className="mt-16 border-t border-stone-300 pt-6">
-            <div className="flex items-end justify-between gap-6">
+            <div className="flex flex-wrap items-end justify-between gap-6">
               <div>
                 <Eyebrow>Price</Eyebrow>
                 <p className="mt-2 font-display text-4xl text-stone-950">{price !== null ? `₹${price.toLocaleString('en-IN')}` : 'Price on request'}</p>
               </div>
               <StatusLabel tone={quantity === 0 ? 'warning' : 'success'}>{quantity === 0 ? 'Unavailable' : 'Available'}</StatusLabel>
             </div>
+            {price !== null && quantity !== 0 && (
+              <div className="mt-8 flex flex-wrap gap-3">
+                <Button
+                  onClick={() => {
+                    addListing(listing, 1);
+                    setAdded(true);
+                  }}
+                >
+                  {added ? 'Added to collection' : 'Add to collection'}
+                </Button>
+                <Button variant="light" onClick={() => navigate('/cart')}>View collection</Button>
+              </div>
+            )}
           </div>
         </article>
         </Reveal>
@@ -99,6 +116,9 @@ const ProductDetailPage: React.FC = () => {
           </p>
         </div>
       </section>
+
+      <ProductReviews productId={listing.id} vendorId={listing.vendor_id} />
+
       <div className="mt-8 flex justify-end">
         <Link to="/marketplace" className="inline-flex items-center gap-3 text-xs font-semibold uppercase tracking-[0.16em] text-stone-950">
           Discover more work <ArrowUpRight className="h-4 w-4" strokeWidth={1.5} />

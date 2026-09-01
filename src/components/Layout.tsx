@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { Briefcase, Compass, Home, LogIn, LogOut, Menu, Sparkles, X } from 'lucide-react';
+import { Briefcase, Compass, Home, LogIn, LogOut, Menu, ShoppingBag, Sparkles, X } from 'lucide-react';
 import { useAuth } from '../auth/useAuthHook';
+import { useCart } from '../context/CartContext';
 import { FloatingDock, FloatingDockItem } from './ui/floating-dock';
 
 interface LayoutProps {
@@ -16,6 +17,7 @@ const navigation = [
 
 const Layout: React.FC<LayoutProps> = ({ children, className = '' }) => {
   const { user, profile, logout } = useAuth();
+  const { itemCount } = useCart();
   const location = useLocation();
   const [menuOpen, setMenuOpen] = useState(false);
 
@@ -36,7 +38,8 @@ const Layout: React.FC<LayoutProps> = ({ children, className = '' }) => {
             className="hidden md:flex"
             items={[
               { title: 'Home', href: '/', active: location.pathname === '/', icon: <Home /> },
-              { title: 'Collection', href: '/marketplace', active: location.pathname.startsWith('/marketplace'), icon: <Compass /> },
+              { title: 'Collection', href: '/marketplace', active: location.pathname.startsWith('/marketplace') && !location.pathname.startsWith('/marketplace/register'), icon: <Compass /> },
+              { title: 'Cart', href: '/cart', active: location.pathname.startsWith('/cart') || location.pathname.startsWith('/checkout'), icon: <ShoppingBag />, badge: itemCount || undefined },
               { title: 'Join ARTISAN', href: '/join', active: location.pathname.startsWith('/join'), icon: <Sparkles /> },
               ...(user && profile ? [
                 { title: 'Workspace', href: profile.role === 'admin' ? '/admin/dashboard' : '/vendor/dashboard', active: location.pathname.includes('dashboard'), icon: <Briefcase /> },
@@ -65,6 +68,9 @@ const Layout: React.FC<LayoutProps> = ({ children, className = '' }) => {
                   {item.label}
                 </Link>
               ))}
+              <Link to="/cart" onClick={closeMenu} className="text-xs font-semibold uppercase tracking-[0.16em] text-stone-700">
+                Cart{itemCount ? ` (${itemCount})` : ''}
+              </Link>
               {user && profile ? (
                 <>
                   <Link to={profile.role === 'admin' ? '/admin/dashboard' : '/vendor/dashboard'} onClick={closeMenu} className="text-xs font-semibold uppercase tracking-[0.16em] text-stone-700">

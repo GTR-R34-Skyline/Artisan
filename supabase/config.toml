@@ -419,6 +419,11 @@ verify_jwt = false
 import_map = "./functions/seed-demo-data/deno.json"
 entrypoint = "./functions/seed-demo-data/index.ts"
 
+[functions.marketplace-checkout]
+enabled = true
+verify_jwt = true
+entrypoint = "./functions/marketplace-checkout/index.ts"
+
 [functions.vendor-commerce]
 enabled = true
 verify_jwt = true

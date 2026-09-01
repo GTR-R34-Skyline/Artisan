@@ -5,11 +5,16 @@ import Login from './components/Login';
 import { AuthProvider } from './auth/useAuth';
 import { useAuth } from './auth/useAuthHook';
 import { RoleRoute } from './auth/RoleRoute';
+import { CartProvider } from './context/CartContext';
 
 const HomePage = lazy(() => import('./pages/HomePage'));
 const MarketplacePage = lazy(() => import('./pages/MarketplacePage'));
 const ProductDetailPage = lazy(() => import('./pages/ProductDetailPage'));
 const CraftsmanPage = lazy(() => import('./pages/CraftsmanPage'));
+const CartPage = lazy(() => import('./pages/CartPage'));
+const CheckoutPage = lazy(() => import('./pages/CheckoutPage'));
+const MockUpiPaymentPage = lazy(() => import('./pages/MockUpiPaymentPage'));
+const OrderConfirmationPage = lazy(() => import('./pages/OrderConfirmationPage'));
 const VendorRegistration = lazy(() => import('./components/VendorRegistration'));
 const VendorDashboard = lazy(() => import('./components/VendorDashboard'));
 const AdminDashboard = lazy(() => import('./components/AdminDashboard'));
@@ -38,6 +43,10 @@ const AppContent: React.FC = () => {
           <Route path="/" element={<HomePage />} />
           <Route path="/marketplace" element={<MarketplacePage />} />
           <Route path="/marketplace/:productId" element={<ProductDetailPage />} />
+          <Route path="/cart" element={<CartPage />} />
+          <Route path="/checkout" element={<CheckoutPage />} />
+          <Route path="/checkout/payment/:orderId" element={<MockUpiPaymentPage />} />
+          <Route path="/checkout/confirmation/:orderId" element={<OrderConfirmationPage />} />
           <Route path="/craftsman/:id" element={<CraftsmanPage />} />
           <Route path="/login" element={<Login />} />
           <Route path="/admin/login" element={<Navigate to="/login" replace />} />
@@ -92,7 +101,9 @@ const AppContent: React.FC = () => {
 
 const App: React.FC = () => (
   <AuthProvider>
-    <AppContent />
+    <CartProvider>
+      <AppContent />
+    </CartProvider>
   </AuthProvider>
 );
 
