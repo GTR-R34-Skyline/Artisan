@@ -3,6 +3,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { ArrowRight } from 'lucide-react';
 import { Button, Eyebrow, Field } from './DesignSystem';
 import { useAuth } from '../auth/useAuthHook';
+import { isVendorDashboardReady } from '../auth/vendorDashboardAccess';
 
 type AuthRole = 'vendor' | 'consumer' | 'admin';
 type LoginLocationState = { from?: { pathname?: string } } | null;
@@ -32,8 +33,11 @@ const Login: React.FC = () => {
       if (activeRole === 'vendor') {
         if (!vendorName.trim() || !vendorPhone.trim()) throw new Error('Please enter your name and phone number.');
         const artisanProfile = await loginAsVendor(vendorName.trim(), vendorPhone.trim(), 'en');
-        const firstVisit = !artisanProfile?.location_state;
-        navigate(redirectPath !== '/' ? redirectPath : firstVisit ? '/vendor/onboarding' : '/vendor/dashboard');
+        const ready = await isVendorDashboardReady(artisanProfile);
+        const destination = ready
+          ? (redirectPath.startsWith('/vendor/') && redirectPath !== '/vendor/onboarding' ? redirectPath : '/vendor/dashboard')
+          : '/vendor/onboarding';
+        navigate(destination);
       } else if (isRegistering) {
         if (!fullName.trim()) throw new Error('Please enter your name.');
         await signUpWithEmail(email.trim(), password, fullName.trim(), 'consumer');

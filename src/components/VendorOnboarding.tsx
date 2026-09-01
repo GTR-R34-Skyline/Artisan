@@ -1,7 +1,9 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowRight, Check, Edit3, Loader2, Mic, Square } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import { ArrowButton, Button, Eyebrow, Field } from './DesignSystem';
 import { useAuth } from '../auth/useAuthHook';
+import { isVendorDashboardReady } from '../auth/vendorDashboardAccess';
 import { supabase } from '../lib/supabase';
 import { ProfileConversationService } from '../services/profileConversation.service';
 import {
@@ -43,6 +45,7 @@ const profileFieldValue = (value: string | number | string[] | null | undefined)
 };
 
 const VendorOnboarding: React.FC = () => {
+  const navigate = useNavigate();
   const { user, profile, fetchProfile } = useAuth();
   const [selectedLanguage, setSelectedLanguage] = useState<SupportedLanguageCode | null>(() => {
     const stored = sessionStorage.getItem('artisan_onboarding_language');
@@ -77,6 +80,19 @@ const VendorOnboarding: React.FC = () => {
       languagesSpoken: profile.preferred_language ? [profile.preferred_language] : state.languagesSpoken,
     }));
   }, [profile]);
+
+  useEffect(() => {
+    if (!profile) return undefined;
+
+    let cancelled = false;
+    void isVendorDashboardReady(profile, user?.email).then((ready) => {
+      if (!cancelled && ready) navigate('/vendor/dashboard', { replace: true });
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [navigate, profile, user?.email]);
 
   useEffect(() => () => {
     recorderRef.current?.stop();

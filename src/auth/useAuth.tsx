@@ -2,9 +2,78 @@ import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
 import { User } from '@supabase/supabase-js';
 import { AuthContext, UserProfile } from './AuthContext';
+import { findExistingVendorProfileByPhone } from './vendorDashboardAccess';
 
 const AUTH_TIMEOUT_MS = 12000;
 const PROFILE_TIMEOUT_MS = 10000;
+const DEMO_VENDOR_PASSWORD = 'Demo@12345';
+
+const uniqueValues = (values: Array<string | null | undefined>): string[] =>
+  Array.from(new Set(values.filter((value): value is string => Boolean(value && value.trim())).map((value) => value.trim())));
+
+const demoEmailsFromName = (name: string | null | undefined): string[] => {
+  if (!name?.trim()) return [];
+  const parts = name.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (!parts.length) return [];
+  const emails = [`${parts[0]}@demo.artisan.market`];
+  if (parts.length >= 2) {
+    const last = parts[parts.length - 1];
+    emails.unshift(`${parts[0]}.${last}@demo.artisan.market`);
+    if (last[0]) emails.push(`${parts[0]}.${last[0]}@demo.artisan.market`);
+  }
+  return emails;
+};
+
+const vendorPasswordCandidates = (phone: string): string[] => {
+  const digits = phone.replace(/\D/g, '');
+  return uniqueValues([
+    DEMO_VENDOR_PASSWORD,
+    `vendor_${phone.trim()}_password`,
+    digits ? `vendor_${digits}_password` : null,
+  ]);
+};
+
+const vendorEmailCandidates = async (profile: UserProfile, name: string, phone: string): Promise<string[]> => {
+  const digits = phone.replace(/\D/g, '');
+  const emails = uniqueValues([
+    ...demoEmailsFromName(profile.full_name),
+    ...demoEmailsFromName(name),
+    `${phone.trim()}@artisan.local`,
+    `${phone.trim()}@sampark.local`,
+    digits ? `${digits}@artisan.local` : null,
+    digits ? `${digits}@sampark.local` : null,
+  ]);
+
+  try {
+    const { data } = await supabase.from('profiles').select('email').eq('id', profile.id).maybeSingle();
+    const email = data && typeof (data as { email?: unknown }).email === 'string'
+      ? (data as { email: string }).email
+      : null;
+    if (email) emails.unshift(email.trim().toLowerCase());
+  } catch {
+    // profiles.email is optional and may not exist.
+  }
+
+  try {
+    const { data } = await supabase
+      .from('vendor_applications')
+      .select('email, phone')
+      .eq('status', 'approved');
+    (data || []).forEach((row) => {
+      const application = row as { email?: string | null; phone?: string | null };
+      const applicationDigits = (application.phone || '').replace(/\D/g, '');
+      const applicationEmail = application.email?.trim().toLowerCase();
+      if (!applicationEmail || !applicationDigits) return;
+      if (applicationDigits === digits || applicationDigits.endsWith(digits) || digits.endsWith(applicationDigits)) {
+        emails.unshift(applicationEmail);
+      }
+    });
+  } catch {
+    // Applications are often hidden until a session exists.
+  }
+
+  return uniqueValues(emails);
+};
 
 const withTimeout = async <T,>(promise: PromiseLike<T>, timeoutMs: number, operation: string): Promise<T> => {
   let timer: ReturnType<typeof setTimeout> | null = null;
@@ -55,116 +124,170 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }, []);
 
-  useEffect(() => {
-    console.log("useAuth useEffect initialization starting...");
-    // 1. Check if there's a stored mock/vendor session
+  const restoreMockSession = useCallback((): boolean => {
     const mockVendorSession = localStorage.getItem('artisan_mock_session');
-    if (mockVendorSession) {
-      try {
-        const parsed = JSON.parse(mockVendorSession);
-        console.log("Found stored mock vendor session:", parsed);
-        if (parsed.version === 2 && parsed.profile?.role !== 'admin') {
-          setUser(parsed.user);
-          setProfile(parsed.profile);
-          setLoading(false);
-          return;
-        }
-        localStorage.removeItem('artisan_mock_session');
-      } catch (e) {
-        console.error('Failed to parse mock vendor session:', e);
+    if (!mockVendorSession) return false;
+    try {
+      const parsed = JSON.parse(mockVendorSession);
+      if (parsed.version === 2 && parsed.profile?.role !== 'admin') {
+        setUser(parsed.user);
+        setProfile(parsed.profile);
+        return true;
       }
+      localStorage.removeItem('artisan_mock_session');
+    } catch (e) {
+      console.error('Failed to parse mock vendor session:', e);
+      localStorage.removeItem('artisan_mock_session');
     }
+    return false;
+  }, []);
 
-    // 2. Otherwise use Supabase standard session
-    console.log("Getting initial session...");
-    withTimeout(supabase.auth.getSession(), AUTH_TIMEOUT_MS, 'Restoring session')
-      .then(({ data: { session } }) => {
-        console.log("Initial session response:", session);
+  useEffect(() => {
+    let cancelled = false;
+
+    const restoreSession = async () => {
+      try {
+        const { data: { session } } = await withTimeout(
+          supabase.auth.getSession(),
+          AUTH_TIMEOUT_MS,
+          'Restoring session',
+        );
+        if (cancelled) return;
         if (session?.user) {
+          localStorage.removeItem('artisan_mock_session');
           setUser(session.user);
-          fetchProfile(session.user.id)
-            .then(prof => {
-              console.log("Profile resolved for initial session:", prof);
-              setProfile(prof);
-            })
-            .finally(() => setLoading(false));
+          const prof = await fetchProfile(session.user.id);
+          if (!cancelled) setProfile(prof);
           return;
         }
-        setLoading(false);
-      })
-      .catch((err) => {
+      } catch (err) {
         console.error('Initial session restore failed:', err);
-        setLoading(false);
-      });
-
-    console.log("Setting up onAuthStateChange listener...");
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
-      console.log("onAuthStateChange event:", event, "session:", session);
-      if (localStorage.getItem('artisan_mock_session')) {
-        console.log("Mock session exists, keeping active");
-        return;
       }
+
+      if (!cancelled && !restoreMockSession()) {
+        setUser(null);
+        setProfile(null);
+      }
+    };
+
+    void restoreSession().finally(() => {
+      if (!cancelled) setLoading(false);
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+      if (event === 'INITIAL_SESSION') return;
+
       if (session?.user) {
+        localStorage.removeItem('artisan_mock_session');
         setUser(session.user);
         fetchProfile(session.user.id).catch((err) => {
           console.error('Profile refresh failed after auth change:', err);
         });
-      } else {
-        setUser(null);
-        setProfile(null);
+        setLoading(false);
+        return;
       }
+
+      if (event !== 'SIGNED_OUT') return;
+
+      if (restoreMockSession()) {
+        setLoading(false);
+        return;
+      }
+
+      setUser(null);
+      setProfile(null);
       setLoading(false);
     });
 
     return () => {
-      console.log("Unsubscribing from onAuthStateChange");
+      cancelled = true;
       subscription.unsubscribe();
     };
-  }, [fetchProfile]);
+  }, [fetchProfile, restoreMockSession]);
+
+  const adoptAuthenticatedVendor = useCallback((sessionUser: User, vendorProfile: UserProfile) => {
+    localStorage.removeItem('artisan_mock_session');
+    setUser(sessionUser);
+    setProfile(vendorProfile);
+    return vendorProfile;
+  }, []);
+
+  const signInExistingVendor = useCallback(async (vendorProfile: UserProfile, name: string, phone: string): Promise<User | null> => {
+    const emails = await vendorEmailCandidates(vendorProfile, name, phone);
+    const passwords = vendorPasswordCandidates(phone);
+
+    for (const email of emails) {
+      for (const password of passwords) {
+        try {
+          const { data, error } = await withTimeout(
+            supabase.auth.signInWithPassword({ email, password }),
+            AUTH_TIMEOUT_MS,
+            'Vendor sign in',
+          );
+          if (error || !data.user) continue;
+          if (data.user.id !== vendorProfile.id) {
+            await supabase.auth.signOut();
+            continue;
+          }
+          const { data: sessionData } = await supabase.auth.getSession();
+          if (!sessionData.session?.access_token) {
+            await supabase.auth.signOut();
+            continue;
+          }
+          return data.user;
+        } catch {
+          // Try the next credential pair.
+        }
+      }
+    }
+
+    return null;
+  }, []);
 
   const loginAsVendor = useCallback(async (name: string, phone: string, language?: 'hi' | 'bn' | 'ta' | 'te' | 'en' | 'kn', locationState?: string): Promise<UserProfile | null> => {
-    console.log("loginAsVendor started:", { name, phone, language, locationState });
     setLoading(true);
     localStorage.removeItem('artisan_mock_session');
 
-    const email = `${phone}@artisan.local`;
-    const password = `vendor_${phone}_password`;
+    const syntheticEmail = `${phone}@artisan.local`;
+    const syntheticPassword = `vendor_${phone}_password`;
 
-    // Heuristically try direct sign-in first to avoid slow Edge Function invocation
+    const existingVendor = await findExistingVendorProfileByPhone(phone);
+
+    if (existingVendor) {
+      const sessionUser = await signInExistingVendor(existingVendor, name, phone);
+      if (!sessionUser) {
+        setLoading(false);
+        throw new Error('We found your workspace, but could not open a secure session. Please try again.');
+      }
+
+      const prof = (await fetchProfile(sessionUser.id)) || existingVendor;
+      setLoading(false);
+      return adoptAuthenticatedVendor(sessionUser, prof);
+    }
+
     try {
-      console.log("Attempting direct sign-in with password...");
       const { data: signInData, error: signInError } = await withTimeout(
         supabase.auth.signInWithPassword({
-          email,
-          password,
+          email: syntheticEmail,
+          password: syntheticPassword,
         }),
         AUTH_TIMEOUT_MS,
         'Vendor sign in'
       );
 
-      if (signInError) {
-        console.warn("Direct sign-in returned error:", signInError);
-      }
-
       if (!signInError && signInData.user) {
-        console.log("Direct sign-in succeeded, user:", signInData.user.id);
         const prof = await fetchProfile(signInData.user.id);
-        console.log("Profile after direct sign-in:", prof);
         if (prof) {
-          setUser(signInData.user);
-          setProfile(prof);
           setLoading(false);
-          console.log("Direct sign-in complete. Redirecting...");
-          return prof;
+          return adoptAuthenticatedVendor(signInData.user, prof);
         }
+        await supabase.auth.signOut();
       }
-    } catch (e) {
-      console.warn("Direct sign-in attempt failed, falling back to Edge Function:", e);
+    } catch {
+      // Continue to registration for genuinely new vendors.
     }
 
-    // Call Edge Function to register or get credentials
     try {
-      console.log("Invoking edge function register-vendor...");
       const { data, error: funcError } = await withTimeout(
         supabase.functions.invoke('register-vendor', {
           body: { name, phone, language, locationState }
@@ -173,18 +296,33 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         'Vendor registration'
       );
 
-      if (funcError) {
-        console.error("Edge function returned error:", funcError);
-        throw funcError;
+      if (funcError) throw funcError;
+      if (!data || !data.success) throw new Error(data?.error || 'Registration failed');
+
+      if (typeof data.userId === 'string' && data.userId) {
+        const registeredProfile = await fetchProfile(data.userId);
+        if (registeredProfile) {
+          try {
+            const { data: signInData, error: signInError } = await withTimeout(
+              supabase.auth.signInWithPassword({
+                email: data.email,
+                password: data.password,
+              }),
+              AUTH_TIMEOUT_MS,
+              'Vendor sign in'
+            );
+            if (!signInError && signInData.user && signInData.user.id === registeredProfile.id) {
+              return adoptAuthenticatedVendor(signInData.user, registeredProfile);
+            }
+            if (signInData.user && signInData.user.id !== registeredProfile.id) {
+              await supabase.auth.signOut();
+            }
+          } catch {
+            // Fall through to another sign-in attempt with the returned credentials.
+          }
+        }
       }
 
-      console.log("Edge function response:", data);
-      if (!data || !data.success) {
-        throw new Error(data?.error || 'Registration failed');
-      }
-
-      // Log in with the credentials returned from the Edge Function
-      console.log("Signing in with credentials from Edge Function...");
       const { data: signInData, error: signInError } = await withTimeout(
         supabase.auth.signInWithPassword({
           email: data.email,
@@ -194,28 +332,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         'Vendor sign in'
       );
 
-      if (signInError) {
-        console.error("Sign in with edge credentials failed:", signInError);
-        throw signInError;
-      }
+      if (signInError) throw signInError;
 
       const authUser = signInData.user;
-      if (!authUser) {
-        throw new Error('Unable to authenticate user session.');
-      }
+      if (!authUser) throw new Error('Unable to authenticate user session.');
 
-      console.log("Signed in successfully. Fetching profile for:", authUser.id);
       const prof = await fetchProfile(authUser.id);
-      console.log("Profile fetched:", prof);
-      setUser(authUser);
-      setProfile(prof);
-      return prof;
-    } catch (e) {
-      console.error("Edge Function login failed, falling back to local-only mock session:", e);
-      
-      // Local-only mock session fallback (Offline-first resilience)
+      if (!prof) throw new Error('Your account profile could not be loaded.');
+      return adoptAuthenticatedVendor(authUser, prof);
+    } catch {
       const mockId = crypto.randomUUID();
-      console.log("Creating local mock session with ID:", mockId);
       const mockProfile: UserProfile = {
         id: mockId,
         role: 'vendor',
@@ -227,23 +353,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       const mockUser = {
         id: mockId,
-        email: `${phone}@artisan.local`,
-        phone: phone,
+        email: syntheticEmail,
+        phone,
         user_metadata: { full_name: name, role: 'vendor' },
         aud: 'authenticated',
         role: 'authenticated'
       } as unknown as User;
 
-      const sessionObj = { version: 2, user: mockUser, profile: mockProfile };
-      localStorage.setItem('artisan_mock_session', JSON.stringify(sessionObj));
+      localStorage.setItem('artisan_mock_session', JSON.stringify({ version: 2, user: mockUser, profile: mockProfile }));
       setUser(mockUser);
       setProfile(mockProfile);
       return mockProfile;
     } finally {
-      console.log("loginAsVendor finished. Setting loading false.");
       setLoading(false);
     }
-  }, [fetchProfile]);
+  }, [adoptAuthenticatedVendor, fetchProfile, signInExistingVendor]);
 
   const loginWithEmail = useCallback(async (
     email: string,

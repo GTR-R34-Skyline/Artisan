@@ -598,6 +598,182 @@
   transform: translateY(-5px);
 }
 
+.analytics-workspace {
+  min-width: 0;
+  overflow-x: hidden;
+}
+
+.analytics-glass-card {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+  border: 1px solid rgba(29, 33, 29, 0.1);
+  border-radius: 1.35rem;
+  background:
+    linear-gradient(165deg, rgba(255, 255, 255, 0.62), rgba(255, 255, 255, 0.18) 46%, rgba(38, 67, 54, 0.045)),
+    rgba(244, 241, 234, 0.35);
+  box-shadow:
+    0 18px 40px rgba(29, 33, 29, 0.05),
+    inset 0 1px 0 rgba(255, 255, 255, 0.72);
+  backdrop-filter: blur(18px);
+  transition: transform 550ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 550ms ease;
+}
+
+.analytics-glass-card::before {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  content: "";
+  background: radial-gradient(circle at top right, rgba(38, 67, 54, 0.08), transparent 42%);
+  opacity: 0.9;
+}
+
+.analytics-glass-card > * {
+  position: relative;
+  z-index: 1;
+}
+
+.analytics-glass-card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 24px 48px rgba(29, 33, 29, 0.08);
+}
+
+.analytics-rating-card {
+  color: #f4f1ea;
+  border-color: rgba(244, 241, 234, 0.08);
+  background:
+    linear-gradient(160deg, rgba(38, 67, 54, 0.96), rgba(29, 33, 29, 0.92) 58%, rgba(38, 67, 54, 0.88));
+  box-shadow: 0 22px 46px rgba(38, 67, 54, 0.22);
+}
+
+.analytics-rating-card::before {
+  background:
+    radial-gradient(circle at 80% 0%, rgba(244, 241, 234, 0.16), transparent 38%),
+    radial-gradient(circle at 0% 100%, rgba(214, 162, 95, 0.14), transparent 36%);
+}
+
+.analytics-icon-chip {
+  display: inline-flex;
+  width: 1.85rem;
+  height: 1.85rem;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: rgba(38, 67, 54, 0.08);
+  color: #264336;
+}
+
+.analytics-icon-chip-light {
+  background: rgba(244, 241, 234, 0.1);
+  color: #f4f1ea;
+}
+
+.analytics-range-pills button {
+  min-height: 2.25rem;
+  padding: 0.5rem 0.9rem;
+  border: 1px solid rgba(29, 33, 29, 0.12);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.28);
+  color: #777c73;
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  transition: color 350ms ease, background-color 350ms ease, border-color 350ms ease, transform 350ms ease;
+}
+
+.analytics-range-pills button:hover,
+.analytics-range-pills button.is-active {
+  color: #f4f1ea;
+  background: #264336;
+  border-color: #264336;
+  transform: translateY(-1px);
+}
+
+.analytics-chart-wrap {
+  overflow: hidden;
+}
+
+.analytics-chart-grid {
+  stroke: rgba(29, 33, 29, 0.08);
+  stroke-width: 1;
+}
+
+.analytics-chart-line {
+  fill: none;
+  stroke: #264336;
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.analytics-chart-guide {
+  stroke: rgba(38, 67, 54, 0.28);
+  stroke-dasharray: 3 5;
+}
+
+.analytics-chart-dot {
+  fill: #f4f1ea;
+  stroke: #264336;
+  stroke-width: 2;
+}
+
+.analytics-chart-axis {
+  fill: #92968d;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+
+.analytics-chart-tooltip {
+  position: absolute;
+  top: 0.5rem;
+  left: clamp(5.5rem, var(--tooltip-x), calc(100% - 5.5rem));
+  z-index: 2;
+  min-width: 7.5rem;
+  padding: 0.7rem 0.85rem;
+  border: 1px solid rgba(29, 33, 29, 0.1);
+  border-radius: 1rem;
+  background: rgba(244, 241, 234, 0.92);
+  box-shadow: 0 14px 30px rgba(29, 33, 29, 0.1);
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.analytics-table-row {
+  transition: background-color 350ms ease;
+}
+
+.analytics-table-row:hover {
+  background: rgba(255, 255, 255, 0.32);
+}
+
+.analytics-bar-track {
+  height: 0.45rem;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(29, 33, 29, 0.08);
+}
+
+.analytics-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #264336, #3d6554);
+  transition: width 700ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.analytics-insight-card.is-restock {
+  box-shadow: inset 3px 0 0 #b45309, 0 18px 40px rgba(29, 33, 29, 0.05);
+}
+
+.analytics-insight-card.is-price,
+.analytics-insight-card.is-visibility {
+  box-shadow: inset 3px 0 0 #264336, 0 18px 40px rgba(29, 33, 29, 0.05);
+}
+
+.analytics-insight-card.is-offer {
+  box-shadow: inset 3px 0 0 #92968d, 0 18px 40px rgba(29, 33, 29, 0.05);
+}
+
 .product-review-table tbody tr {
   transition: background-color 350ms ease;
 }
@@ -694,6 +870,248 @@
   to { transform: rotate(360deg) scale(1); }
 }
 
+.admin-analytics {
+  min-width: 0;
+}
+
+.admin-panel {
+  border: 1px solid rgba(29, 33, 29, 0.12);
+  border-radius: 0.85rem;
+  background: rgba(255, 255, 255, 0.42);
+}
+
+.admin-section-label {
+  margin-bottom: 0.85rem;
+  color: #777c73;
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.admin-metric-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.85rem;
+}
+
+.admin-metric-card {
+  display: flex;
+  min-height: 11.5rem;
+  flex-direction: column;
+  padding: 1.1rem 1.15rem 0.7rem;
+  border: 1px solid rgba(29, 33, 29, 0.12);
+  border-radius: 0.85rem;
+  background: rgba(255, 255, 255, 0.42);
+}
+
+.admin-metric-label {
+  color: #777c73;
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.admin-metric-value {
+  margin-top: 1.15rem;
+  color: #1d211d;
+  font-family: "Iowan Old Style", "Baskerville", "Times New Roman", serif;
+  font-size: clamp(1.85rem, 3vw, 2.45rem);
+  line-height: 1;
+  letter-spacing: -0.04em;
+}
+
+.admin-metric-hint {
+  margin-top: 0.55rem;
+  color: #8a8e85;
+  font-size: 0.72rem;
+}
+
+.admin-metric-spark {
+  margin-top: auto;
+  padding-top: 0.85rem;
+}
+
+.admin-sparkline {
+  display: block;
+  width: 100%;
+  height: 3.4rem;
+}
+
+.admin-sparkline-fill {
+  fill: rgba(38, 67, 54, 0.12);
+}
+
+.admin-sparkline-line {
+  fill: none;
+  stroke: #264336;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.admin-sparkline-mark {
+  fill: #264336;
+}
+
+.admin-range-pills button {
+  min-height: 2.1rem;
+  padding: 0.45rem 0.8rem;
+  border: 1px solid rgba(29, 33, 29, 0.12);
+  background: transparent;
+  color: #777c73;
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  transition: color 250ms ease, background-color 250ms ease, border-color 250ms ease;
+}
+
+.admin-range-pills button:hover,
+.admin-range-pills button.is-active {
+  color: #f4f1ea;
+  background: #264336;
+  border-color: #264336;
+}
+
+.admin-chart-wrap {
+  overflow: hidden;
+}
+
+.admin-chart-grid {
+  stroke: rgba(29, 33, 29, 0.08);
+  stroke-width: 1;
+}
+
+.admin-chart-line {
+  fill: none;
+  stroke: #264336;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.admin-chart-guide {
+  stroke: rgba(38, 67, 54, 0.28);
+  stroke-dasharray: 3 5;
+}
+
+.admin-chart-dot {
+  fill: #f4f1ea;
+  stroke: #264336;
+  stroke-width: 2;
+}
+
+.admin-chart-axis {
+  fill: #92968d;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+
+.admin-chart-tooltip {
+  position: absolute;
+  top: 0.5rem;
+  left: clamp(5.5rem, var(--tooltip-x), calc(100% - 5.5rem));
+  z-index: 2;
+  min-width: 8.5rem;
+  padding: 0.7rem 0.85rem;
+  border: 1px solid rgba(29, 33, 29, 0.12);
+  background: rgba(244, 241, 234, 0.96);
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.admin-donut-slice {
+  transition: opacity 200ms ease;
+}
+
+.admin-donut-slice.is-muted {
+  opacity: 0.28;
+}
+
+.admin-donut-value {
+  fill: #1d211d;
+  font-family: "Iowan Old Style", "Baskerville", "Times New Roman", serif;
+  font-size: 22px;
+}
+
+.admin-donut-caption {
+  fill: #92968d;
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.admin-bar-track,
+.admin-inline-bar {
+  height: 0.28rem;
+  overflow: hidden;
+  background: rgba(29, 33, 29, 0.08);
+}
+
+.admin-bar-fill,
+.admin-inline-bar span {
+  display: block;
+  height: 100%;
+  background: #264336;
+}
+
+.admin-inventory-track {
+  display: flex;
+  height: 0.42rem;
+  overflow: hidden;
+  background: rgba(29, 33, 29, 0.08);
+}
+
+.admin-inventory-healthy {
+  display: block;
+  height: 100%;
+  background: #264336;
+}
+
+.admin-inventory-low {
+  display: block;
+  height: 100%;
+  background: #b59a6a;
+}
+
+.admin-rank-table thead th {
+  padding: 0.85rem 1rem 0.85rem 0;
+  border-bottom: 1px solid rgba(29, 33, 29, 0.14);
+  color: #777c73;
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.admin-rank-table tbody td {
+  padding: 0.9rem 1rem 0.9rem 0;
+  border-bottom: 1px solid rgba(29, 33, 29, 0.08);
+  vertical-align: middle;
+}
+
+.admin-rank-table tbody tr:hover {
+  background: rgba(255, 255, 255, 0.28);
+}
+
+@media (min-width: 700px) {
+  .admin-metric-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .admin-metric-grid-3 {
+    grid-template-columns: 1fr 1fr 1fr;
+  }
+}
+
+@media (min-width: 1100px) {
+  .admin-metric-grid {
+    grid-template-columns: repeat(4, 1fr);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .reveal {
     opacity: 1;
@@ -714,8 +1132,13 @@
     animation: none;
   }
 
-  .noise-background::before {
-    animation: none;
+  .analytics-glass-card:hover {
+    transform: none;
+  }
+
+  .analytics-range-pills button:hover,
+  .analytics-range-pills button.is-active {
+    transform: none;
   }
 }
 

@@ -1,7 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Check, Search, X } from 'lucide-react';
-import { EmptyState, Eyebrow, SectionHeading, StatusLabel } from './DesignSystem';
+import { EmptyState, Eyebrow, StatusLabel } from './DesignSystem';
 import { supabase } from '../lib/supabase';
+import { useAuth } from '../auth/useAuthHook';
+import { loadAdminAnalytics } from '../services/adminAnalytics.service';
+import { AdminAnalytics } from '../types/adminAnalytics';
+import { AdminOverview } from './admin/AdminOverview';
+import { AdminMarketplace } from './admin/AdminMarketplace';
 
 interface AdminDashboardProps {
   onLogout: () => void;
@@ -30,45 +35,53 @@ interface MarketplaceItem {
   created_at: string;
 }
 
-interface Review {
-  id: string;
-  rating: number;
-}
-
-type AdminView = 'overview' | 'applications' | 'products';
+type AdminView = 'overview' | 'marketplace' | 'applications' | 'products';
 
 const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
+  const { user, profile, loading: authLoading } = useAuth();
   const [view, setView] = useState<AdminView>('overview');
   const [applications, setApplications] = useState<Application[]>([]);
   const [products, setProducts] = useState<MarketplaceItem[]>([]);
-  const [reviews, setReviews] = useState<Review[]>([]);
+  const [analytics, setAnalytics] = useState<AdminAnalytics | null>(null);
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
   const fetchData = useCallback(async () => {
+    if (!user || profile?.role !== 'admin') return;
     setLoading(true);
     setError('');
     try {
-      const [applicationResult, reviewResult, productResult] = await Promise.all([
+      const { data: sessionData } = await supabase.auth.getSession();
+      if (!sessionData.session?.access_token) {
+        throw new Error('The admin session is not available.');
+      }
+
+      const [applicationResult, productResult, snapshot] = await Promise.all([
         supabase.from('vendor_applications').select('*').order('created_at', { ascending: false }),
-        supabase.from('customer_reviews').select('id, rating').order('created_at', { ascending: false }),
         supabase.from('products').select('id, vendor_id, title, title_en, category, material, status, created_at').order('created_at', { ascending: false }),
+        loadAdminAnalytics(),
       ]);
-      if (applicationResult.error) throw applicationResult.error;
-      if (reviewResult.error) throw reviewResult.error;
-      if (productResult.error) throw productResult.error;
+      if (applicationResult.error) throw new Error(`vendor_applications: ${applicationResult.error.message}`);
+      if (productResult.error) throw new Error(`products: ${productResult.error.message}`);
       setApplications((applicationResult.data || []) as Application[]);
-      setReviews((reviewResult.data || []) as Review[]);
       setProducts((productResult.data || []) as MarketplaceItem[]);
-    } catch {
-      setError('The operational data could not be loaded.');
+      setAnalytics(snapshot);
+    } catch (loadError) {
+      const message = loadError instanceof Error ? loadError.message : 'The operational data could not be loaded.';
+      console.error('Admin analytics load failed:', loadError);
+      setError(message);
+      setAnalytics(null);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [profile?.role, user]);
 
-  useEffect(() => { void fetchData(); }, [fetchData]);
+  useEffect(() => {
+    if (authLoading || !user || profile?.role !== 'admin') return undefined;
+    void fetchData();
+    return undefined;
+  }, [authLoading, fetchData, profile?.role, user]);
 
   const updateApplication = async (id: string, status: 'approved' | 'rejected') => {
     const reason = status === 'rejected' ? window.prompt('Reason for rejection') : undefined;
@@ -132,35 +145,26 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onLogout }) => {
     return applications.filter((application) => [application.name, application.email, application.location, application.status].filter(Boolean).join(' ').toLowerCase().includes(query));
   }, [applications, search]);
 
-  const pendingApplications = applications.filter((application) => application.status === 'pending');
-  const pendingProducts = products.filter((product) => ['pending_review', 'under_review'].includes(product.status));
-  const averageRating = reviews.length ? (reviews.reduce((sum, review) => sum + review.rating, 0) / reviews.length).toFixed(1) : null;
-
   return (
     <div className="workspace-page admin-workspace mx-auto max-w-[1400px] px-6 pb-28 pt-12 lg:px-10 lg:pt-20">
       <header className="workspace-header flex flex-col gap-8 border-b border-stone-300 pb-8 sm:flex-row sm:items-end sm:justify-between">
-        <div className="space-y-5"><Eyebrow>Operations</Eyebrow><h1 className="font-display text-6xl leading-[0.9] tracking-[-0.05em] sm:text-8xl">The workroom.</h1></div>
+        <div className="space-y-5">
+          <Eyebrow>Operations</Eyebrow>
+          <h1 className="font-display text-6xl leading-[0.9] tracking-[-0.05em] sm:text-8xl">The workroom.</h1>
+          <p className="max-w-md text-sm leading-6 text-stone-600">A considered view of the marketplace — sales, inventory, and the work still waiting for review.</p>
+        </div>
         <button onClick={onLogout} className="text-left text-[10px] font-semibold uppercase tracking-[0.16em] text-stone-500 hover:text-stone-950">Sign out</button>
       </header>
       <nav className="workspace-nav flex flex-wrap gap-7 border-b border-stone-300 py-6">
-        {(['overview', 'applications', 'products'] as AdminView[]).map((item) => <button key={item} type="button" onClick={() => setView(item)} className={`text-[10px] font-semibold uppercase tracking-[0.16em] ${view === item ? 'text-stone-950' : 'text-stone-500 hover:text-stone-950'}`}>{item}</button>)}
+        {(['overview', 'marketplace', 'applications', 'products'] as AdminView[]).map((item) => (
+          <button key={item} type="button" onClick={() => setView(item)} className={`text-[10px] font-semibold uppercase tracking-[0.16em] ${view === item ? 'text-stone-950' : 'text-stone-500 hover:text-stone-950'}`}>{item}</button>
+        ))}
       </nav>
       {error && <p className="border-b border-stone-300 py-5 text-sm text-red-700">{error}</p>}
-      {loading ? <div className="py-16 text-[10px] font-semibold uppercase tracking-[0.18em] text-stone-500">Loading operations</div> : (
+      {authLoading || loading ? <div className="py-16 text-[10px] font-semibold uppercase tracking-[0.18em] text-stone-500">Loading operations</div> : (
         <>
-          {view === 'overview' && (
-            <div className="workspace-overview grid gap-16 py-12 lg:grid-cols-[0.9fr_1fr]">
-              <SectionHeading eyebrow="Today" title="Keep the collection considered." description="Review new applications and product submissions as they arrive. Every decision shapes the quality of the collection." />
-              <div className="metric-list border-t border-stone-300">
-                {[
-                  ['Applications awaiting review', pendingApplications.length],
-                  ['Products awaiting review', pendingProducts.length],
-                  ['Published reviews', reviews.length],
-                  ['Average rating', averageRating || '—'],
-                ].map(([label, value]) => <div key={label} className="flex items-center justify-between border-b border-stone-300 py-5 text-sm"><span className="text-stone-600">{label}</span><span className="font-display text-3xl text-stone-950">{value}</span></div>)}
-              </div>
-            </div>
-          )}
+          {view === 'overview' && analytics && <AdminOverview analytics={analytics} />}
+          {view === 'marketplace' && analytics && <AdminMarketplace analytics={analytics} />}
           {view === 'applications' && (
             <section className="py-12">
               <div className="flex flex-col gap-6 border-b border-stone-300 pb-7 sm:flex-row sm:items-end sm:justify-between"><div><Eyebrow>Applications</Eyebrow><h2 className="mt-3 font-display text-4xl">Artisan profiles.</h2></div><label className="flex items-center gap-3 border-b border-stone-300 pb-2 sm:w-64"><Search className="h-4 w-4 text-stone-400" strokeWidth={1.5} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search" className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-stone-400" /></label></div>
