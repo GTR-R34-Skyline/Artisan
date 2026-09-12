@@ -1,13 +1,15 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Check, Edit3, Loader2, Mic, Square } from 'lucide-react';
 import { Button, Eyebrow, Field } from './DesignSystem';
-import { ProfileConversationService } from '../services/profileConversation.service';
 import { ProgressiveAudioPlayer } from '../services/progressiveAudioPlayback';
-import { DeepgramStreamingStt } from '../services/deepgramStreamingStt';
+import { createProfileVoiceStt, sendProfileVoiceTurn, startProfileVoicePipeline } from '../services/profileVoicePipeline';
 import { VoiceTurnTimer } from '../services/profileVoiceTiming';
+import { VoiceTurnMachine } from '../services/voiceTurnMachine';
+import { LocalVoiceStatusNotice } from './LocalVoiceStatusNotice';
 import {
   ArtisanProfileState,
   createInitialProfileState,
+  ProfileConversationRequest,
   ProfileConversationResponse,
 } from '../types/profileConversation';
 import { SupportedLanguageCode } from '../types/catalogConversation';
@@ -67,16 +69,20 @@ const VoiceProfileCapture: React.FC<VoiceProfileCaptureProps> = ({ onSubmit }) =
   const [editing, setEditing] = useState(false);
   const [error, setError] = useState('');
   const [submitError, setSubmitError] = useState('');
-  const [shouldAutoListen, setShouldAutoListen] = useState(false);
   const startedAtRef = useRef(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const startedRef = useRef(false);
-  const sttRef = useRef<DeepgramStreamingStt | null>(null);
+  const sttRef = useRef<ReturnType<typeof createProfileVoiceStt> | null>(null);
   const turnGenerationRef = useRef(0);
   const stopInFlightRef = useRef(false);
   const abortControllerRef = useRef<AbortController | null>(null);
   const audioPlayerRef = useRef(new ProgressiveAudioPlayer());
+  const turnMachineRef = useRef(new VoiceTurnMachine());
+
+  useEffect(() => {
+    startProfileVoicePipeline();
+  }, []);
 
   useEffect(() => () => {
     sttRef.current?.abort();
@@ -108,13 +114,17 @@ const VoiceProfileCapture: React.FC<VoiceProfileCaptureProps> = ({ onSubmit }) =
     abortControllerRef.current = abortController;
     audioPlayerRef.current.reset(turnGeneration);
     audioRef.current?.pause();
+    sttRef.current?.abort();
+    sttRef.current = null;
+    startedRef.current = false;
 
+    turnMachineRef.current.set('PROCESSING', { clientTurnId, turnGeneration });
     setStatus('processing');
     setError('');
     const timer = new VoiceTurnTimer();
 
     try {
-      const request: Parameters<typeof ProfileConversationService.sendTurnStreaming>[0] = {
+      const request: ProfileConversationRequest = {
         selectedLanguage: language,
         profileState,
         publicApplication: true,
@@ -125,7 +135,7 @@ const VoiceProfileCapture: React.FC<VoiceProfileCaptureProps> = ({ onSubmit }) =
       };
 
       timer.mark('gemini_request_sent', { clientTurnId, turnGeneration });
-      const response = await ProfileConversationService.sendTurnStreaming(
+      const response = await sendProfileVoiceTurn(
         request,
         {
           onTranscript: (transcript) => {
@@ -134,6 +144,9 @@ const VoiceProfileCapture: React.FC<VoiceProfileCaptureProps> = ({ onSubmit }) =
           },
           onAssistantText: () => undefined,
           onAudioChunk: (chunk) => {
+            if (turnMachineRef.current.current === 'PROCESSING') {
+              turnMachineRef.current.set('AI_SPEAKING', { clientTurnId, turnGeneration, index: chunk.index });
+            }
             audioPlayerRef.current.enqueue(chunk.audioBase64, chunk.audioMimeType, chunk.index, turnGeneration);
           },
           onError: (message, stage) => {
@@ -150,24 +163,35 @@ const VoiceProfileCapture: React.FC<VoiceProfileCaptureProps> = ({ onSubmit }) =
       setLastTranscript(response.transcript || payload.transcript?.trim() || '');
       setInterimTranscript('');
       if (response.emptyTranscript) {
-        setShouldAutoListen(false);
+        turnMachineRef.current.set('WAITING_FOR_USER', { reason: 'empty_transcript' });
         setStatus('idle');
         return;
       }
       if (response.errorMessage) {
         setError(response.errorMessage);
         setShowManual(true);
-        setShouldAutoListen(false);
+        turnMachineRef.current.set('WAITING_FOR_USER', { reason: 'error' });
         setStatus('manual');
       }
       if (!response.errorMessage) {
-        setShouldAutoListen(!response.conversationComplete);
-        setStatus(response.conversationComplete ? 'review' : 'idle');
+        setStatus(response.conversationComplete ? 'review' : 'processing');
+      }
+      if (turnMachineRef.current.current === 'PROCESSING' && audioPlayerRef.current.isBusy()) {
+        turnMachineRef.current.set('AI_SPEAKING', { clientTurnId, turnGeneration });
       }
       await audioPlayerRef.current.waitForIdle(turnGeneration);
+      if (turnGeneration !== turnGenerationRef.current) return;
+      if (response.conversationComplete && !response.errorMessage) {
+        turnMachineRef.current.set('WAITING_FOR_USER', { reason: 'review' });
+        setStatus('review');
+      } else if (!response.errorMessage) {
+        turnMachineRef.current.set('WAITING_FOR_USER', { clientTurnId, turnGeneration });
+        setStatus('idle');
+      }
       timer.mark('turn_complete');
     } catch (conversationError) {
       if (turnGeneration !== turnGenerationRef.current) return;
+      turnMachineRef.current.set('WAITING_FOR_USER', { reason: 'exception' });
       setStatus('manual');
       setShowManual(true);
       setError(conversationError instanceof Error ? conversationError.message : 'We could not understand that. You can type instead.');
@@ -197,18 +221,22 @@ const VoiceProfileCapture: React.FC<VoiceProfileCaptureProps> = ({ onSubmit }) =
 
     try {
       setStatus('processing');
+      turnMachineRef.current.set('PROCESSING');
       const durationSec = Math.max(1, Math.round((Date.now() - startedAtRef.current) / 1000));
       const speechResult = await stt.stop();
       sttRef.current = null;
       startedRef.current = false;
+      turnMachineRef.current.logFinalTranscript(speechResult.transcript);
 
       if (durationSec > MAX_RECORDING_SECONDS) {
+        turnMachineRef.current.set('WAITING_FOR_USER', { reason: 'too_long' });
         setStatus('idle');
         setError(`Please keep each response under ${MAX_RECORDING_SECONDS} seconds.`);
         return;
       }
 
       if (!speechResult.transcript.trim()) {
+        turnMachineRef.current.set('WAITING_FOR_USER', { reason: 'empty_transcript' });
         setStatus('idle');
         setError('We could not hear anything. Please try speaking again.');
         return;
@@ -226,6 +254,8 @@ const VoiceProfileCapture: React.FC<VoiceProfileCaptureProps> = ({ onSubmit }) =
 
   const startListening = useCallback(async (language = selectedLanguage) => {
     if (!language) return;
+    if (!turnMachineRef.current.canStartListening()) return;
+    if (audioPlayerRef.current.isBusy() || turnMachineRef.current.isAiTurnActive()) return;
     if (!navigator.mediaDevices?.getUserMedia) {
       setStatus('manual');
       setShowManual(true);
@@ -233,11 +263,14 @@ const VoiceProfileCapture: React.FC<VoiceProfileCaptureProps> = ({ onSubmit }) =
       return;
     }
     try {
+      sttRef.current?.abort();
+      sttRef.current = null;
       setInterimTranscript('');
       setLastTranscript('');
       startedAtRef.current = Date.now();
+      turnMachineRef.current.set('LISTENING', { language });
 
-      const stt = new DeepgramStreamingStt(
+      const stt = createProfileVoiceStt(
         language,
         ({ finalized, interim }) => {
           setLastTranscript(finalized);
@@ -248,6 +281,12 @@ const VoiceProfileCapture: React.FC<VoiceProfileCaptureProps> = ({ onSubmit }) =
       );
       sttRef.current = stt;
       await stt.start();
+      if (turnMachineRef.current.current !== 'LISTENING') {
+        stt.abort();
+        sttRef.current = null;
+        startedRef.current = false;
+        return;
+      }
       startedRef.current = true;
       setStatus('listening');
 
@@ -260,27 +299,19 @@ const VoiceProfileCapture: React.FC<VoiceProfileCaptureProps> = ({ onSubmit }) =
       }, 250);
     } catch (recordingError) {
       clearRecording();
+      turnMachineRef.current.set('WAITING_FOR_USER', { reason: 'mic_error' });
       setStatus('manual');
       setShowManual(true);
       setError(recordingError instanceof Error ? recordingError.message : 'Microphone permission is required.');
     }
   }, [clearRecording, clearRecordingTimer, selectedLanguage, stopListeningAndSubmit]);
 
-  useEffect(() => {
-    if (!selectedLanguage || startedRef.current || status !== 'idle' || !shouldAutoListen) return undefined;
-    const timer = window.setTimeout(() => {
-      setShouldAutoListen(false);
-      startListening(selectedLanguage);
-    }, 800);
-    return () => window.clearTimeout(timer);
-  }, [selectedLanguage, shouldAutoListen, startListening, status]);
-
   const chooseLanguage = (language: SupportedLanguageCode) => {
     setSelectedLanguage(language);
     setProfileState(createInitialProfileState(language));
     setLastTranscript('');
     setInterimTranscript('');
-    setShouldAutoListen(true);
+    turnMachineRef.current.set('IDLE', { language });
     setStatus('idle');
   };
 
@@ -336,6 +367,9 @@ const VoiceProfileCapture: React.FC<VoiceProfileCaptureProps> = ({ onSubmit }) =
           <Eyebrow>Join ARTISAN</Eyebrow>
           <h1 className="mt-5 max-w-md font-display text-6xl leading-[0.9] tracking-[-0.05em] sm:text-8xl">Make room for your voice.</h1>
           <p className="mt-7 max-w-sm text-sm leading-7 text-stone-600">Choose the language you speak. From there, tell us about yourself naturally.</p>
+          <div className="mt-8">
+            <LocalVoiceStatusNotice />
+          </div>
         </div>
         <div className="border-y border-stone-300 py-7">
           <Eyebrow>One choice</Eyebrow>
@@ -377,6 +411,9 @@ const VoiceProfileCapture: React.FC<VoiceProfileCaptureProps> = ({ onSubmit }) =
             <div className="flex items-center justify-between">
               <Eyebrow>{statusLabel}</Eyebrow>
               <span className="text-[10px] uppercase tracking-[0.16em] text-stone-400">{LANGUAGE_CONFIG[selectedLanguage || 'en'].displayName}</span>
+            </div>
+            <div className="mt-6">
+              <LocalVoiceStatusNotice />
             </div>
             <div className="mt-10 flex flex-col items-center border-y border-stone-300 py-14">
               <button
@@ -460,7 +497,7 @@ const VoiceProfileCapture: React.FC<VoiceProfileCaptureProps> = ({ onSubmit }) =
                 <Button variant="light" onClick={() => setEditing((value) => !value)}><Edit3 className="h-4 w-4" strokeWidth={1.5} />{editing ? 'Done editing' : 'Edit'}</Button>
                 <Button disabled={profileState.missingRequiredFields.length > 0 || editing} onClick={() => void submitProfile()}>Approve & submit<Check className="h-4 w-4" strokeWidth={1.5} /></Button>
               </div>
-              <button type="button" onClick={() => { setShouldAutoListen(true); setStatus('idle'); }} className="mt-6 text-[10px] font-semibold uppercase tracking-[0.16em] text-stone-500 underline decoration-stone-300 underline-offset-4">Continue speaking</button>
+              <button type="button" onClick={() => { turnMachineRef.current.set('WAITING_FOR_USER'); setStatus('idle'); void startListening(); }} className="mt-6 text-[10px] font-semibold uppercase tracking-[0.16em] text-stone-500 underline decoration-stone-300 underline-offset-4">Continue speaking</button>
             </div>
           )}
         </aside>

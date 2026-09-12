@@ -73,4 +73,8 @@ export class ProgressiveAudioPlayer {
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
   }
+
+  isBusy(): boolean {
+    return this.playing || this.queue.length > 0;
+  }
 }

@@ -5,13 +5,15 @@ import { ArrowButton, Button, Eyebrow, Field } from './DesignSystem';
 import { useAuth } from '../auth/useAuthHook';
 import { isVendorDashboardReady } from '../auth/vendorDashboardAccess';
 import { supabase } from '../lib/supabase';
-import { ProfileConversationService } from '../services/profileConversation.service';
 import { ProgressiveAudioPlayer } from '../services/progressiveAudioPlayback';
-import { DeepgramStreamingStt } from '../services/deepgramStreamingStt';
+import { createProfileVoiceStt, sendProfileVoiceTurn, startProfileVoicePipeline } from '../services/profileVoicePipeline';
 import { VoiceTurnTimer } from '../services/profileVoiceTiming';
+import { VoiceTurnMachine } from '../services/voiceTurnMachine';
+import { LocalVoiceStatusNotice } from './LocalVoiceStatusNotice';
 import {
   ArtisanProfileState,
   createInitialProfileState,
+  ProfileConversationRequest,
   ProfileConversationResponse,
 } from '../types/profileConversation';
 import { SupportedLanguageCode } from '../types/catalogConversation';
@@ -69,11 +71,16 @@ const VendorOnboarding: React.FC = () => {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const startedRef = useRef(false);
   const hydratedRef = useRef(false);
-  const sttRef = useRef<DeepgramStreamingStt | null>(null);
+  const sttRef = useRef<ReturnType<typeof createProfileVoiceStt> | null>(null);
   const turnGenerationRef = useRef(0);
   const stopInFlightRef = useRef(false);
   const abortControllerRef = useRef<AbortController | null>(null);
   const audioPlayerRef = useRef(new ProgressiveAudioPlayer());
+  const turnMachineRef = useRef(new VoiceTurnMachine());
+
+  useEffect(() => {
+    startProfileVoicePipeline();
+  }, []);
 
   useEffect(() => {
     if (!profile || hydratedRef.current) return;
@@ -129,13 +136,17 @@ const VendorOnboarding: React.FC = () => {
     abortControllerRef.current = abortController;
     audioPlayerRef.current.reset(turnGeneration);
     audioRef.current?.pause();
+    sttRef.current?.abort();
+    sttRef.current = null;
+    startedRef.current = false;
 
+    turnMachineRef.current.set('PROCESSING', { clientTurnId, turnGeneration });
     setStatus('processing');
     setError('');
     const timer = new VoiceTurnTimer();
 
     try {
-      const request: Parameters<typeof ProfileConversationService.sendTurnStreaming>[0] = {
+      const request: ProfileConversationRequest = {
         selectedLanguage: language,
         profileState,
         stream: true,
@@ -145,7 +156,7 @@ const VendorOnboarding: React.FC = () => {
       };
 
       timer.mark('gemini_request_sent', { clientTurnId, turnGeneration });
-      const response = await ProfileConversationService.sendTurnStreaming(
+      const response = await sendProfileVoiceTurn(
         request,
         {
           onTranscript: (transcript) => {
@@ -154,6 +165,9 @@ const VendorOnboarding: React.FC = () => {
           },
           onAssistantText: (text) => setAssistantMessage(text),
           onAudioChunk: (chunk) => {
+            if (turnMachineRef.current.current === 'PROCESSING') {
+              turnMachineRef.current.set('AI_SPEAKING', { clientTurnId, turnGeneration, index: chunk.index });
+            }
             audioPlayerRef.current.enqueue(chunk.audioBase64, chunk.audioMimeType, chunk.index, turnGeneration);
           },
           onError: (message, stage) => {
@@ -171,21 +185,37 @@ const VendorOnboarding: React.FC = () => {
       setInterimTranscript('');
       setAssistantMessage(response.assistantMessage || assistantMessage);
       if (response.emptyTranscript) {
+        turnMachineRef.current.set('WAITING_FOR_USER', { reason: 'empty_transcript' });
         setStatus('idle');
         return;
       }
       if (response.errorMessage) {
+        turnMachineRef.current.set('WAITING_FOR_USER', { reason: 'error' });
         setStatus('manual');
         setShowManual(true);
         setError(response.errorMessage);
       } else {
-        setStatus(response.conversationComplete ? 'review' : 'asking_followup');
+        setStatus('processing');
       }
       sessionStorage.setItem('artisan_onboarding_state', JSON.stringify(nextState));
+      if (turnMachineRef.current.current === 'PROCESSING' && audioPlayerRef.current.isBusy()) {
+        turnMachineRef.current.set('AI_SPEAKING', { clientTurnId, turnGeneration });
+      }
       await audioPlayerRef.current.waitForIdle(turnGeneration);
+      if (turnGeneration !== turnGenerationRef.current) return;
+      if (response.errorMessage) {
+        // already waiting in manual
+      } else if (response.conversationComplete) {
+        turnMachineRef.current.set('WAITING_FOR_USER', { reason: 'review' });
+        setStatus('review');
+      } else {
+        turnMachineRef.current.set('WAITING_FOR_USER', { clientTurnId, turnGeneration });
+        setStatus('asking_followup');
+      }
       timer.mark('turn_complete');
     } catch (conversationError) {
       if (turnGeneration !== turnGenerationRef.current) return;
+      turnMachineRef.current.set('WAITING_FOR_USER', { reason: 'exception' });
       setStatus('manual');
       setShowManual(true);
       setError(conversationError instanceof Error ? conversationError.message : 'We could not understand that. You can type your answer instead.');
@@ -215,18 +245,22 @@ const VendorOnboarding: React.FC = () => {
 
     try {
       setStatus('processing');
+      turnMachineRef.current.set('PROCESSING');
       const durationSec = Math.max(1, Math.round((Date.now() - startedAtRef.current) / 1000));
       const speechResult = await stt.stop();
       sttRef.current = null;
       startedRef.current = false;
+      turnMachineRef.current.logFinalTranscript(speechResult.transcript);
 
       if (durationSec > MAX_RECORDING_SECONDS) {
+        turnMachineRef.current.set('WAITING_FOR_USER', { reason: 'too_long' });
         setStatus('idle');
         setError(`Please keep each response under ${MAX_RECORDING_SECONDS} seconds.`);
         return;
       }
 
       if (!speechResult.transcript.trim()) {
+        turnMachineRef.current.set('WAITING_FOR_USER', { reason: 'empty_transcript' });
         setStatus('idle');
         setError('We could not hear anything. Please try speaking again.');
         return;
@@ -244,6 +278,8 @@ const VendorOnboarding: React.FC = () => {
 
   const startListening = useCallback(async (language = selectedLanguage) => {
     if (!language) return;
+    if (!turnMachineRef.current.canStartListening()) return;
+    if (audioPlayerRef.current.isBusy() || turnMachineRef.current.isAiTurnActive()) return;
     if (!navigator.mediaDevices?.getUserMedia) {
       setStatus('manual');
       setShowManual(true);
@@ -253,8 +289,11 @@ const VendorOnboarding: React.FC = () => {
     setInterimTranscript('');
     setLastTranscript('');
     try {
+      sttRef.current?.abort();
+      sttRef.current = null;
       startedAtRef.current = Date.now();
-      const stt = new DeepgramStreamingStt(
+      turnMachineRef.current.set('LISTENING', { language });
+      const stt = createProfileVoiceStt(
         language,
         ({ finalized, interim }) => {
           setLastTranscript(finalized);
@@ -264,6 +303,12 @@ const VendorOnboarding: React.FC = () => {
       );
       sttRef.current = stt;
       await stt.start();
+      if (turnMachineRef.current.current !== 'LISTENING') {
+        stt.abort();
+        sttRef.current = null;
+        startedRef.current = false;
+        return;
+      }
       startedRef.current = true;
       setStatus('listening');
 
@@ -276,26 +321,19 @@ const VendorOnboarding: React.FC = () => {
       }, 250);
     } catch (recordingError) {
       clearRecording();
+      turnMachineRef.current.set('WAITING_FOR_USER', { reason: 'mic_error' });
       setStatus('manual');
       setShowManual(true);
       setError(recordingError instanceof Error ? recordingError.message : 'Microphone permission is required.');
     }
   }, [clearRecording, clearRecordingTimer, selectedLanguage, stopListeningAndSubmit]);
 
-  useEffect(() => {
-    if (selectedLanguage && !startedRef.current && status === 'idle' && !lastTranscript) {
-      setAssistantMessage('Tell us about yourself. You can speak naturally.');
-      const timer = window.setTimeout(() => startListening(selectedLanguage), 80);
-      return () => window.clearTimeout(timer);
-    }
-    return undefined;
-  }, [lastTranscript, selectedLanguage, startListening, status]);
-
   const chooseLanguage = (language: SupportedLanguageCode) => {
     setSelectedLanguage(language);
     sessionStorage.setItem('artisan_onboarding_language', language);
     setProfileState((state) => ({ ...state, languagesSpoken: Array.from(new Set([...state.languagesSpoken, language])) }));
     setAssistantMessage('Tell us about yourself. You can speak naturally.');
+    turnMachineRef.current.set('IDLE', { language });
     setStatus('idle');
   };
 
@@ -385,6 +423,9 @@ const VendorOnboarding: React.FC = () => {
           <Eyebrow>Begin here</Eyebrow>
           <h1 className="mt-5 font-display text-6xl leading-[0.9] tracking-[-0.05em] sm:text-7xl">Let’s make room for your voice.</h1>
           <p className="mt-6 max-w-sm text-sm leading-7 text-stone-600">The interface stays in English. Your spoken language guides the conversation.</p>
+          <div className="mt-8">
+            <LocalVoiceStatusNotice />
+          </div>
         </div>
         <div className="border-y border-stone-300 py-7">
           <Eyebrow>One choice</Eyebrow>
@@ -417,6 +458,9 @@ const VendorOnboarding: React.FC = () => {
           <div className="voice-panel border-y border-stone-300 py-8">
             <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-stone-500">{statusCopy[status]}</p>
             <h2 className="mt-5 max-w-xl font-display text-4xl leading-tight text-stone-950">{assistantMessage}</h2>
+            <div className="mt-6">
+              <LocalVoiceStatusNotice />
+            </div>
             <div className="mt-12 flex flex-col items-center border-y border-stone-300 py-10">
               <div className={`flex h-28 w-28 items-center justify-center border border-stone-950 ${status === 'listening' ? 'bg-forest text-white' : 'bg-stone-950 text-white'}`}>
                 {status === 'processing' ? <Loader2 className="h-8 w-8 animate-spin" strokeWidth={1.25} /> : status === 'listening' ? <Square className="h-7 w-7" strokeWidth={1.25} /> : <Mic className="h-8 w-8" strokeWidth={1.25} />}
@@ -455,7 +499,7 @@ const VendorOnboarding: React.FC = () => {
               <p className="text-sm leading-7 text-stone-600">Here’s what we’ve understood. Review every detail before sending it.</p>
               {editing && <div className="mt-7 space-y-7"><Field label="Name" value={profileFieldValue(profileState.name)} onChange={(event) => updateField('name', event.target.value)} /><Field label="Location" value={profileFieldValue(profileState.location)} onChange={(event) => updateField('location', event.target.value)} /><Field label="Craft" value={profileFieldValue(profileState.craft)} onChange={(event) => updateField('craft', event.target.value)} /><Field label="Years of experience" value={profileFieldValue(profileState.experienceYears)} onChange={(event) => updateField('experienceYears', event.target.value)} type="number" /><Field label="Story" value={profileFieldValue(profileState.story)} onChange={(event) => updateField('story', event.target.value)} textarea /></div>}
               <div className="mt-7 flex flex-wrap gap-6"><Button variant="light" onClick={() => setEditing((value) => !value)}><Edit3 className="h-4 w-4" strokeWidth={1.5} /> {editing ? 'Done editing' : 'Edit'}</Button><Button disabled={submitting || editing || profileState.missingRequiredFields.length > 0} onClick={() => void approveAndSubmit()}>{submitting ? 'Submitting' : 'Approve & submit'} <Check className="h-4 w-4" strokeWidth={1.5} /></Button></div>
-              <button type="button" onClick={() => { setStatus('asking_followup'); startListening(); }} className="mt-6 inline-flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-stone-500 hover:text-stone-950">Continue speaking <Mic className="h-4 w-4" strokeWidth={1.5} /></button>
+              <button type="button" onClick={() => { turnMachineRef.current.set('WAITING_FOR_USER'); setStatus('asking_followup'); void startListening(); }} className="mt-6 inline-flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-stone-500 hover:text-stone-950">Continue speaking <Mic className="h-4 w-4" strokeWidth={1.5} /></button>
             </div>
           )}
         </aside>
