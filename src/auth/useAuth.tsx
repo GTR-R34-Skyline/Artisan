@@ -372,7 +372,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const loginWithEmail = useCallback(async (
     email: string,
     password: string,
-    expectedRole?: 'consumer' | 'admin',
+    expectedRole?: 'consumer' | 'admin' | 'courier',
   ): Promise<UserProfile> => {
     setLoading(true);
     localStorage.removeItem('artisan_mock_session');
@@ -407,6 +407,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setProfile(null);
       setLoading(false);
       throw new Error('This account is not authorized for the admin workspace.');
+    }
+
+    if (expectedRole === 'courier' && authenticatedProfile.role !== 'courier') {
+      await supabase.auth.signOut();
+      setUser(null);
+      setProfile(null);
+      setLoading(false);
+      throw new Error('This account is not authorized for the courier workspace.');
     }
 
     setUser(data.user);

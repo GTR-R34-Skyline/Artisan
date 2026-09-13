@@ -5,7 +5,21 @@ import { Button, Eyebrow, Field } from './DesignSystem';
 import { useAuth } from '../auth/useAuthHook';
 import { isVendorDashboardReady } from '../auth/vendorDashboardAccess';
 
-type AuthRole = 'vendor' | 'consumer' | 'admin';
+type AuthRole = 'vendor' | 'consumer' | 'courier' | 'admin';
+
+const roleLabel = (role: AuthRole) => {
+  if (role === 'vendor') return 'Artisan';
+  if (role === 'consumer') return 'Buyer';
+  if (role === 'courier') return 'Courier';
+  return 'Admin';
+};
+
+const postLoginPath = (role: AuthRole | string, redirectPath: string) => {
+  if (role === 'admin') return '/admin/dashboard';
+  if (role === 'courier') return redirectPath.startsWith('/courier/') ? redirectPath : '/courier/dashboard';
+  return redirectPath;
+};
+
 type LoginLocationState = { from?: { pathname?: string } } | null;
 
 const Login: React.FC = () => {
@@ -44,8 +58,12 @@ const Login: React.FC = () => {
         setIsRegistering(false);
         setError('Account created. You can now sign in.');
       } else {
-        await loginWithEmail(email.trim(), password, activeRole);
-        navigate(activeRole === 'admin' ? '/admin/dashboard' : redirectPath);
+        const authenticatedProfile = await loginWithEmail(
+          email.trim(),
+          password,
+          activeRole === 'admin' || activeRole === 'courier' ? activeRole : undefined,
+        );
+        navigate(postLoginPath(authenticatedProfile.role, redirectPath));
       }
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : 'Authentication failed. Please try again.');
@@ -67,14 +85,14 @@ const Login: React.FC = () => {
 
       <div className="auth-panel border-y border-stone-300 py-8 lg:mt-16">
         <div className="role-tabs mb-10 flex gap-6 border-b border-stone-300">
-          {(['vendor', 'consumer', 'admin'] as AuthRole[]).map((role) => (
+          {(['vendor', 'consumer', 'courier', 'admin'] as AuthRole[]).map((role) => (
             <button
               key={role}
               type="button"
               onClick={() => { setActiveRole(role); setError(''); setIsRegistering(false); }}
               className={`-mb-px border-b-2 pb-4 text-[10px] font-semibold uppercase tracking-[0.16em] transition-colors ${activeRole === role ? 'border-stone-950 text-stone-950' : 'border-transparent text-stone-500 hover:text-stone-950'}`}
             >
-              {role === 'vendor' ? 'Artisan' : role === 'consumer' ? 'Buyer' : 'Admin'}
+              {roleLabel(role)}
             </button>
           ))}
         </div>

@@ -42,7 +42,7 @@ const Layout: React.FC<LayoutProps> = ({ children, className = '' }) => {
               { title: 'Cart', href: '/cart', active: location.pathname.startsWith('/cart') || location.pathname.startsWith('/checkout'), icon: <ShoppingBag />, badge: itemCount || undefined },
               { title: 'Join ARTISAN', href: '/join', active: location.pathname.startsWith('/join'), icon: <Sparkles /> },
               ...(user && profile ? [
-                { title: 'Workspace', href: profile.role === 'admin' ? '/admin/dashboard' : '/vendor/dashboard', active: location.pathname.includes('dashboard'), icon: <Briefcase /> },
+                { title: 'Workspace', href: profile.role === 'admin' ? '/admin/dashboard' : profile.role === 'courier' ? '/courier/dashboard' : '/vendor/dashboard', active: location.pathname.includes('dashboard') || location.pathname.startsWith('/courier/'), icon: <Briefcase /> },
                 { title: 'Sign out', onClick: () => { void logout(); }, icon: <LogOut /> },
               ] : [
                 { title: 'Sign in', href: '/login', active: location.pathname.startsWith('/login'), icon: <LogIn /> },
@@ -73,7 +73,7 @@ const Layout: React.FC<LayoutProps> = ({ children, className = '' }) => {
               </Link>
               {user && profile ? (
                 <>
-                  <Link to={profile.role === 'admin' ? '/admin/dashboard' : '/vendor/dashboard'} onClick={closeMenu} className="text-xs font-semibold uppercase tracking-[0.16em] text-stone-700">
+                  <Link to={profile.role === 'admin' ? '/admin/dashboard' : profile.role === 'courier' ? '/courier/dashboard' : '/vendor/dashboard'} onClick={closeMenu} className="text-xs font-semibold uppercase tracking-[0.16em] text-stone-700">
                     Workspace
                   </Link>
                   <button onClick={() => { closeMenu(); void logout(); }} className="text-left text-xs font-semibold uppercase tracking-[0.16em] text-stone-700">

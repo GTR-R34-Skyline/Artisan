@@ -40,7 +40,7 @@ const asProfile = (row: unknown): UserProfile | null => {
   if (!row || typeof row !== 'object') return null;
   const source = row as Record<string, unknown>;
   if (typeof source.id !== 'string' || typeof source.role !== 'string') return null;
-  if (source.role !== 'vendor' && source.role !== 'consumer' && source.role !== 'admin') return null;
+  if (source.role !== 'vendor' && source.role !== 'consumer' && source.role !== 'admin' && source.role !== 'courier') return null;
   return {
     id: source.id,
     role: source.role,

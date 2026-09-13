@@ -1,9 +1,10 @@
 import React from 'react';
 import { Navigate, useLocation } from 'react-router-dom';
+import { ProfileRole } from './AuthContext';
 import { useAuth } from './useAuthHook';
 
 interface RoleRouteProps {
-  allowedRoles: ('vendor' | 'consumer' | 'admin')[];
+  allowedRoles: ProfileRole[];
   children: React.ReactNode;
 }
 
@@ -37,7 +38,9 @@ export const RoleRoute: React.FC<RoleRouteProps> = ({ allowedRoles, children }) 
         ? '/admin/dashboard'
         : profile.role === 'vendor'
           ? '/vendor/dashboard'
-          : '/marketplace';
+          : profile.role === 'courier'
+            ? '/courier/dashboard'
+            : '/marketplace';
 
     return <Navigate to={roleHome} replace />;
   }

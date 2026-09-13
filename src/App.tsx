@@ -18,6 +18,8 @@ const OrderConfirmationPage = lazy(() => import('./pages/OrderConfirmationPage')
 const VendorRegistration = lazy(() => import('./components/VendorRegistration'));
 const VendorDashboard = lazy(() => import('./components/VendorDashboard'));
 const AdminDashboard = lazy(() => import('./components/AdminDashboard'));
+const CourierDashboardPage = lazy(() => import('./pages/courier/CourierDashboardPage'));
+const ShipmentDetailPage = lazy(() => import('./pages/courier/ShipmentDetailPage'));
 const VendorOnboarding = lazy(() => import('./components/VendorOnboarding').then((module) => ({ default: module.VendorOnboarding })));
 const SimplifiedListingWizard = lazy(() => import('./pages/vendor/SimplifiedListingWizard').then((module) => ({ default: module.SimplifiedListingWizard })));
 
@@ -89,6 +91,22 @@ const AppContent: React.FC = () => {
             element={
               <RoleRoute allowedRoles={['admin']}>
                 <AdminDashboard onLogout={handleAdminLogout} />
+              </RoleRoute>
+            }
+          />
+          <Route
+            path="/courier/dashboard"
+            element={
+              <RoleRoute allowedRoles={['courier']}>
+                <CourierDashboardPage />
+              </RoleRoute>
+            }
+          />
+          <Route
+            path="/courier/shipments/:shipmentId"
+            element={
+              <RoleRoute allowedRoles={['courier']}>
+                <ShipmentDetailPage />
               </RoleRoute>
             }
           />

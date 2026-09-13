@@ -12,8 +12,9 @@ import { RevenueChart } from './analytics/RevenueChart';
 import { ProductPerformance } from './analytics/ProductPerformance';
 import { BusinessRecommendations } from './analytics/BusinessRecommendations';
 import { ReviewsSection } from './analytics/ReviewsSection';
+import { VendorShipmentsPanel } from './vendor/VendorShipmentsPanel';
 
-type WorkspaceView = 'overview' | 'products' | 'insights' | 'reviews';
+type WorkspaceView = 'overview' | 'products' | 'shipments' | 'insights' | 'reviews';
 
 const emptyAnalytics = (warning: string | null = null): VendorAnalytics => ({
   products: [],
@@ -109,7 +110,7 @@ const VendorDashboard: React.FC = () => {
       </header>
 
       <nav className="workspace-nav flex flex-wrap gap-x-7 gap-y-4 border-b border-stone-300 py-6">
-        {(['overview', 'products', 'insights', 'reviews'] as WorkspaceView[]).map((item) => (
+        {(['overview', 'products', 'shipments', 'insights', 'reviews'] as WorkspaceView[]).map((item) => (
           <button key={item} type="button" onClick={() => setView(item)} className={`text-[10px] font-semibold uppercase tracking-[0.16em] ${view === item ? 'text-stone-950' : 'text-stone-500 hover:text-stone-950'}`}>
             {item}
           </button>
@@ -156,6 +157,12 @@ const VendorDashboard: React.FC = () => {
           {view === 'products' && (
             <section className="py-12">
               <ProductPerformance rows={analytics.productRows} />
+            </section>
+          )}
+
+          {view === 'shipments' && profile && (
+            <section className="py-12">
+              <VendorShipmentsPanel vendorId={profile.id} />
             </section>
           )}
 
