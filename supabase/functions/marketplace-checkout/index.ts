@@ -6,6 +6,12 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
+/**
+ * Fixed Demo Courier for the current marketplace logistics demo.
+ * Keep in sync with src/config/logistics.ts (DEMO_COURIER_PROFILE_ID).
+ */
+const DEMO_COURIER_PROFILE_ID = '3734f939-b7c3-4f1d-bdce-a2460cf76a58';
+
 const PUBLIC_STATUSES = new Set(['approved', 'published', 'synced']);
 
 const json = (body: Record<string, unknown>, status = 200) =>
@@ -51,6 +57,104 @@ const productPrice = (row: Record<string, unknown>): number => {
   const suggested = row.suggested_price;
   if (finalPrice !== null && finalPrice !== undefined) return Math.max(0, toNumber(finalPrice));
   return Math.max(0, toNumber(suggested));
+};
+
+const uniqueStrings = (values: Array<string | null | undefined>): string[] =>
+  Array.from(new Set(values.filter((value): value is string => Boolean(value && value.trim()))));
+
+const buildTrackingNumber = (orderId: string, sequence: number): string => {
+  const orderPrefix = orderId.replace(/-/g, '').slice(0, 8).toUpperCase();
+  const suffix = String(Math.max(1, sequence)).padStart(4, '0');
+  return `MC${orderPrefix}${suffix}`;
+};
+
+const estimatedDeliveryDate = (): string => {
+  const date = new Date();
+  date.setUTCDate(date.getUTCDate() + 5);
+  return date.toISOString().slice(0, 10);
+};
+
+/** Create one pending shipment per vendor on an order. Idempotent for retries. */
+const ensureShipmentsForPaidOrder = async (
+  admin: ReturnType<typeof createClient>,
+  orderId: string,
+): Promise<void> => {
+  const { data: order, error: orderError } = await admin
+    .from('orders')
+    .select('id, buyer_id, shipping_address, status')
+    .eq('id', orderId)
+    .maybeSingle();
+
+  if (orderError) throw orderError;
+  if (!order) throw new Error('Order not found while preparing shipments.');
+
+  const orderRecord = asRecord(order);
+  const buyerId = toStringValue(orderRecord.buyer_id);
+  const destination = toStringValue(orderRecord.shipping_address);
+  if (!buyerId) throw new Error('Order buyer is missing.');
+  if (!destination) throw new Error('Order shipping address is missing.');
+
+  const { data: itemRows, error: itemsError } = await admin
+    .from('order_items')
+    .select('vendor_id')
+    .eq('order_id', orderId);
+
+  if (itemsError) throw itemsError;
+
+  const vendorIds = uniqueStrings(
+    (itemRows || []).map((row) => toStringValue(asRecord(row).vendor_id)),
+  );
+  if (!vendorIds.length) return;
+
+  const { data: existingRows, error: existingError } = await admin
+    .from('shipments')
+    .select('id, vendor_id, tracking_number')
+    .eq('order_id', orderId);
+
+  if (existingError) throw existingError;
+
+  const existingVendorIds = new Set(
+    (existingRows || [])
+      .map((row) => toStringValue(asRecord(row).vendor_id))
+      .filter((value): value is string => Boolean(value)),
+  );
+
+  const missingVendorIds = vendorIds.filter((vendorId) => !existingVendorIds.has(vendorId));
+  if (!missingVendorIds.length) return;
+
+  const { count: shipmentCount, error: countError } = await admin
+    .from('shipments')
+    .select('id', { count: 'exact', head: true });
+
+  if (countError) throw countError;
+
+  let sequence = (shipmentCount || 0) + 1;
+  const inserts = missingVendorIds.map((vendorId) => {
+    const trackingNumber = buildTrackingNumber(orderId, sequence);
+    sequence += 1;
+    return {
+      order_id: orderId,
+      vendor_id: vendorId,
+      buyer_id: buyerId,
+      courier_id: null,
+      carrier: 'Mock Courier',
+      tracking_number: trackingNumber,
+      status: 'pending',
+      origin: 'Artisan Origin',
+      destination,
+      estimated_delivery_date: estimatedDeliveryDate(),
+      dispatched_at: null,
+      picked_up_at: null,
+      delivered_at: null,
+    };
+  });
+
+  const { error: insertError } = await admin.from('shipments').insert(inserts);
+  if (insertError) {
+    // Concurrent retries may race; treat unique/duplicate conflicts as already prepared.
+    if (insertError.code === '23505') return;
+    throw insertError;
+  }
 };
 
 interface CartItemInput {
@@ -260,6 +364,11 @@ serve(async (req) => {
       if (itemsError) throw itemsError;
       if (paymentError) throw paymentError;
 
+      const paymentStatus = toStringValue(asRecord(payment).status)?.toLowerCase();
+      if (paymentStatus === 'success') {
+        await ensureShipmentsForPaidOrder(admin, orderId);
+      }
+
       const productIds = (items || [])
         .map((row) => toStringValue(asRecord(row).product_id))
         .filter((id): id is string => Boolean(id));
@@ -302,6 +411,18 @@ serve(async (req) => {
         return json({ error: error.message || 'Payment could not be processed.' }, 400);
       }
 
+      const result = asRecord(data);
+      const paymentStatus = toStringValue(result.payment_status)?.toLowerCase();
+      if (paymentStatus === 'success') {
+        try {
+          await ensureShipmentsForPaidOrder(admin, orderId);
+        } catch (shipmentError) {
+          return json({
+            error: readError(shipmentError) || 'Payment succeeded, but shipment preparation failed.',
+          }, 500);
+        }
+      }
+
       return json({ success: true, result: data });
     }
 
@@ -319,6 +440,191 @@ serve(async (req) => {
       }
 
       return json({ success: true, result: data });
+    }
+
+    if (action === 'ensure_shipments') {
+      const orderId = toStringValue(body.orderId) || toStringValue(body.order_id);
+      if (!orderId) return json({ error: 'Order id is required.' }, 400);
+
+      const { data: order, error: orderError } = await admin
+        .from('orders')
+        .select('id, buyer_id')
+        .eq('id', orderId)
+        .maybeSingle();
+      if (orderError) throw orderError;
+      if (!order) return json({ error: 'Order not found.' }, 404);
+
+      const orderBuyerId = toStringValue(asRecord(order).buyer_id);
+      const isBuyer = orderBuyerId === userId;
+      let isVendor = false;
+      if (!isBuyer) {
+        const { data: vendorItems, error: vendorItemsError } = await admin
+          .from('order_items')
+          .select('id')
+          .eq('order_id', orderId)
+          .eq('vendor_id', userId)
+          .limit(1);
+        if (vendorItemsError) throw vendorItemsError;
+        isVendor = Boolean(vendorItems?.length);
+      }
+
+      if (!isBuyer && !isVendor) {
+        return json({ error: 'You cannot prepare shipments for this order.' }, 403);
+      }
+
+      const { data: payment, error: paymentError } = await admin
+        .from('payments')
+        .select('status')
+        .eq('order_id', orderId)
+        .maybeSingle();
+      if (paymentError) throw paymentError;
+
+      const paymentStatus = toStringValue(asRecord(payment).status)?.toLowerCase();
+      if (paymentStatus !== 'success') {
+        return json({ success: true, prepared: false, reason: 'payment_not_success' });
+      }
+
+      await ensureShipmentsForPaidOrder(admin, orderId);
+      return json({ success: true, prepared: true });
+    }
+
+    if (action === 'dispatch_shipment') {
+      const shipmentId = toStringValue(body.shipmentId) || toStringValue(body.shipment_id) || toStringValue(body.p_shipment_id);
+      if (!shipmentId) return json({ error: 'Shipment id is required.' }, 400);
+
+      const { data: existingShipment, error: existingError } = await admin
+        .from('shipments')
+        .select('id, vendor_id, status, courier_id, tracking_number, order_id')
+        .eq('id', shipmentId)
+        .maybeSingle();
+
+      if (existingError) throw existingError;
+      if (!existingShipment) return json({ error: 'Shipment not found.' }, 404);
+
+      const shipmentRecord = asRecord(existingShipment);
+      const shipmentVendorId = toStringValue(shipmentRecord.vendor_id);
+      if (!shipmentVendorId || shipmentVendorId !== userId) {
+        return json({ error: 'You can only dispatch your own shipments.' }, 403);
+      }
+
+      const currentStatus = toStringValue(shipmentRecord.status) || '';
+      if (!['pending', 'seller_processing'].includes(currentStatus)) {
+        return json({ error: 'This shipment cannot be dispatched from its current status.' }, 400);
+      }
+
+      // Run the existing seller dispatch RPC as the authenticated seller (ownership + event creation).
+      const { data: rpcData, error: rpcError } = await userClient.rpc('seller_dispatch_shipment', {
+        p_shipment_id: shipmentId,
+      });
+
+      if (rpcError) {
+        return json({ error: rpcError.message || 'The shipment could not be marked as dispatched.' }, 400);
+      }
+
+      // Assign every dispatched shipment to the single Demo Courier account.
+      const { data: assigned, error: assignError } = await admin
+        .from('shipments')
+        .update({ courier_id: DEMO_COURIER_PROFILE_ID })
+        .eq('id', shipmentId)
+        .eq('vendor_id', userId)
+        .eq('status', 'dispatched')
+        .select('id, order_id, vendor_id, buyer_id, courier_id, carrier, tracking_number, status, origin, destination, estimated_delivery_date, dispatched_at, picked_up_at, delivered_at, created_at, updated_at')
+        .maybeSingle();
+
+      if (assignError) {
+        return json({
+          error: assignError.message || 'Shipment was dispatched, but the Demo Courier could not be assigned.',
+        }, 500);
+      }
+
+      return json({
+        success: true,
+        shipment: assigned || rpcData,
+      });
+    }
+
+    // Buyer tracking read path. Direct table SELECT is currently empty under buyer RLS
+    // (courier/vendor policies exist; buyer_id SELECT does not). This action verifies
+    // order ownership then returns that buyer's shipments + events via service role.
+    if (action === 'list_order_shipments') {
+      const orderId = toStringValue(body.orderId) || toStringValue(body.order_id);
+      if (!orderId) return json({ error: 'Order id is required.' }, 400);
+
+      const { data: order, error: orderError } = await admin
+        .from('orders')
+        .select('id, buyer_id')
+        .eq('id', orderId)
+        .maybeSingle();
+      if (orderError) throw orderError;
+      if (!order || asRecord(order).buyer_id !== userId) {
+        return json({ error: 'Order not found.' }, 404);
+      }
+
+      const { data: shipmentRows, error: shipmentError } = await admin
+        .from('shipments')
+        .select(
+          'id, order_id, vendor_id, buyer_id, courier_id, carrier, tracking_number, status, origin, destination, estimated_delivery_date, dispatched_at, picked_up_at, delivered_at, created_at, updated_at',
+        )
+        .eq('order_id', orderId)
+        .eq('buyer_id', userId)
+        .order('created_at', { ascending: true });
+      if (shipmentError) throw shipmentError;
+
+      const shipments = (shipmentRows || []).map(asRecord);
+      const shipmentIds = shipments
+        .map((row) => toStringValue(row.id))
+        .filter((id): id is string => Boolean(id));
+
+      let events: Record<string, unknown>[] = [];
+      if (shipmentIds.length) {
+        const { data: eventRows, error: eventsError } = await admin
+          .from('shipment_events')
+          .select('id, shipment_id, status, location, description, actor_type, actor_id, event_time, created_at')
+          .in('shipment_id', shipmentIds)
+          .order('event_time', { ascending: true });
+        if (eventsError) throw eventsError;
+        events = (eventRows || []).map(asRecord);
+      }
+
+      return json({ success: true, shipments, events });
+    }
+
+    if (action === 'list_shipment_summaries') {
+      const orderIdsRaw = Array.isArray(body.orderIds)
+        ? body.orderIds
+        : Array.isArray(body.order_ids)
+          ? body.order_ids
+          : [];
+      const orderIds = orderIdsRaw
+        .map((value) => toStringValue(value))
+        .filter((id): id is string => Boolean(id));
+      if (!orderIds.length) {
+        return json({ success: true, shipments: [] });
+      }
+
+      const { data: ownedOrders, error: ownedError } = await admin
+        .from('orders')
+        .select('id')
+        .eq('buyer_id', userId)
+        .in('id', orderIds);
+      if (ownedError) throw ownedError;
+
+      const ownedIds = (ownedOrders || [])
+        .map((row) => toStringValue(asRecord(row).id))
+        .filter((id): id is string => Boolean(id));
+      if (!ownedIds.length) {
+        return json({ success: true, shipments: [] });
+      }
+
+      const { data: shipmentRows, error: shipmentError } = await admin
+        .from('shipments')
+        .select('order_id, status, created_at, buyer_id')
+        .eq('buyer_id', userId)
+        .in('order_id', ownedIds)
+        .order('created_at', { ascending: false });
+      if (shipmentError) throw shipmentError;
+
+      return json({ success: true, shipments: (shipmentRows || []).map(asRecord) });
     }
 
     return json({ error: 'Unsupported action.' }, 400);

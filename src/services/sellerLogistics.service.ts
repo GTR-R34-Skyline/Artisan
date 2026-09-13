@@ -140,6 +140,29 @@ export const listVendorOrderShipments = async (vendorId: string): Promise<Vendor
     shipmentsByOrderId.set(shipment.order_id, existing);
   });
 
+  const missingShipmentOrderIds = orderIds.filter((orderId) => !shipmentsByOrderId.has(orderId));
+  if (missingShipmentOrderIds.length) {
+    await Promise.all(
+      missingShipmentOrderIds.map(async (orderId) => {
+        const { error } = await supabase.functions.invoke('marketplace-checkout', {
+          body: { action: 'ensure_shipments', orderId },
+        });
+        if (error) {
+          console.warn('Shipment ensure failed for order', orderId, error);
+        }
+      }),
+    );
+
+    const refreshed = await listVendorShipments(vendorId);
+    shipmentsByOrderId.clear();
+    refreshed.forEach((shipment) => {
+      if (!shipment.order_id) return;
+      const existing = shipmentsByOrderId.get(shipment.order_id) || [];
+      existing.push(shipment);
+      shipmentsByOrderId.set(shipment.order_id, existing);
+    });
+  }
+
   const rows: VendorOrderShipmentRow[] = [];
 
   (ordersResult.data || []).forEach((orderRow) => {
@@ -184,16 +207,44 @@ export const dispatchSellerShipment = async (
 ): Promise<Shipment> => {
   await requireVendorSession(vendorId);
 
-  const { data, error } = await supabase.rpc('seller_dispatch_shipment', {
-    p_shipment_id: shipmentId,
+  const { data, error } = await supabase.functions.invoke('marketplace-checkout', {
+    body: {
+      action: 'dispatch_shipment',
+      shipmentId,
+    },
   });
 
   if (error) {
-    throw new Error(error.message || 'The shipment could not be marked as dispatched.');
+    const message = await (async () => {
+      if (error && typeof error === 'object' && 'context' in error) {
+        const context = (error as { context?: Response }).context;
+        if (context instanceof Response) {
+          try {
+            const payload = await context.json();
+            if (payload && typeof payload === 'object' && typeof (payload as { error?: unknown }).error === 'string') {
+              return (payload as { error: string }).error;
+            }
+          } catch {
+            // Fall through to generic message.
+          }
+        }
+      }
+      return error instanceof Error ? error.message : 'The shipment could not be marked as dispatched.';
+    })();
+    throw new Error(message);
   }
 
-  const fromRpc = asShipment(data);
-  if (fromRpc) return fromRpc;
+  const payload = data && typeof data === 'object' ? (data as Record<string, unknown>) : {};
+  if (payload.success === false) {
+    throw new Error(
+      typeof payload.error === 'string' && payload.error
+        ? payload.error
+        : 'The shipment could not be marked as dispatched.',
+    );
+  }
+
+  const fromEdge = asShipment(payload.shipment);
+  if (fromEdge) return fromEdge;
 
   const { data: refreshed, error: refreshError } = await supabase
     .from('shipments')
