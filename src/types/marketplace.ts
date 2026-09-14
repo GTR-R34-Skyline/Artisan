@@ -20,6 +20,7 @@ export interface MarketplaceProduct {
   original_image_url: string | null;
   studio_image_url: string | null;
   enhanced_image_url: string | null;
+  enhancement_status?: 'idle' | 'processing' | 'completed' | 'failed' | null;
   final_price: number | null;
   suggested_price: number | null;
   quantity: number | null;

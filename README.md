@@ -19,11 +19,11 @@ Provider credentials must never use a `VITE_` prefix. Keep them in Supabase Edge
 - `DEEPGRAM_API_KEY`
 - `CARTESIA_API_KEY`
 - `CARTESIA_VOICE_ID`
-- `GEMINI_API_KEY`
+- `GEMINI_API_KEY` (profile/catalog conversation only — not image enhancement)
+- `PHOTOROOM_API_KEY` (image enhancement via `enhance-image`)
 - `DEEPGRAM_MODEL` (optional)
 - `CARTESIA_MODEL` (optional)
 - `GEMINI_REASONING_MODEL` (optional, defaults to `gemini-3.6-flash`)
-- `GEMINI_IMAGE_MODEL` (optional, defaults to `gemini-3.1-flash-image`)
 
 ## Supabase
 

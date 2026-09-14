@@ -9,7 +9,7 @@ import { enhanceImageClientSide } from '../../services/imageEnhancement';
 import { ProductData } from '../../services/listingConversation';
 import { ConversationState } from '../../types/catalogConversation';
 import { MarketplaceProduct, getProductImage } from '../../types/marketplace';
-import { compressImage } from '../../utils/media';
+import { compressImage, prepareOriginalImage } from '../../utils/media';
 
 type WizardStep = 1 | 2 | 3 | 4 | 5;
 type DraftProduct = MarketplaceProduct & { conversation_state?: Partial<ConversationState>; catalog_status?: string };
@@ -23,6 +23,7 @@ const SimplifiedListingWizard: React.FC = () => {
   const [step, setStep] = useState<WizardStep>(1);
   const [draftId, setDraftId] = useState<string | null>(null);
   const [capturedImage, setCapturedImage] = useState<string | null>(null);
+  const [originalImageUrl, setOriginalImageUrl] = useState<string | null>(null);
   const [enhancedImageUrl, setEnhancedImageUrl] = useState<string | null>(null);
   const [enhancementStatus, setEnhancementStatus] = useState<'idle' | 'processing' | 'completed' | 'failed'>('idle');
   const [extractedData, setExtractedData] = useState<ProductData>({ title: '', material: '', raw_description: '', quantity: 1 });
@@ -48,7 +49,16 @@ const SimplifiedListingWizard: React.FC = () => {
 
   const resumeDraft = (draft: DraftProduct) => {
     setDraftId(draft.id);
+    const originalUrl = draft.original_image_url || null;
+    setOriginalImageUrl(originalUrl);
     setCapturedImage(getProductImage(draft));
+    setEnhancedImageUrl(draft.enhanced_image_url || null);
+    // Treat interrupted "processing" as idle so sellers can retry after a refresh.
+    setEnhancementStatus(
+      draft.enhancement_status === 'completed' || draft.enhancement_status === 'failed'
+        ? draft.enhancement_status
+        : 'idle'
+    );
     setConversationState(draft.conversation_state || {});
     setExtractedData({
       title: draft.title || draft.title_en || '',
@@ -67,6 +77,9 @@ const SimplifiedListingWizard: React.FC = () => {
     setPendingDraft(null);
     setDraftId(null);
     setCapturedImage(null);
+    setOriginalImageUrl(null);
+    setEnhancedImageUrl(null);
+    setEnhancementStatus('idle');
     setExtractedData({ title: '', material: '', raw_description: '', quantity: 1 });
     setConversationState({});
   };
@@ -90,24 +103,42 @@ const SimplifiedListingWizard: React.FC = () => {
     setLoading(true);
     try {
       const id = draftId || crypto.randomUUID();
-      const compressed = await compressImage(file);
-      const extension = compressed.name.split('.').pop() || 'jpg';
-      const path = `originals/${user.id}/${id}/${Date.now()}.${extension}`;
-      const { error: uploadError } = await supabase.storage.from('marketplace-images').upload(path, compressed, { upsert: true });
-      if (uploadError) throw uploadError;
-      const imageUrl = supabase.storage.from('marketplace-images').getPublicUrl(path).data.publicUrl;
+      // High-fidelity original for Gemini; separate display derivative for marketplace UI.
+      const originalFile = await prepareOriginalImage(file);
+      const displayFile = await compressImage(file);
+      const originalExt = originalFile.name.split('.').pop() || 'jpg';
+      const displayExt = displayFile.name.split('.').pop() || 'jpg';
+      const originalPath = `originals/${user.id}/${id}/${Date.now()}.${originalExt}`;
+      const displayPath = `display/${user.id}/${id}/${Date.now()}.${displayExt}`;
+
+      const { error: originalUploadError } = await supabase.storage
+        .from('marketplace-images')
+        .upload(originalPath, originalFile, { upsert: true, contentType: originalFile.type || 'image/jpeg' });
+      if (originalUploadError) throw originalUploadError;
+
+      const { error: displayUploadError } = await supabase.storage
+        .from('marketplace-images')
+        .upload(displayPath, displayFile, { upsert: true, contentType: displayFile.type || 'image/jpeg' });
+      if (displayUploadError) throw displayUploadError;
+
+      const hqUrl = supabase.storage.from('marketplace-images').getPublicUrl(originalPath).data.publicUrl;
+      const displayUrl = supabase.storage.from('marketplace-images').getPublicUrl(displayPath).data.publicUrl;
+
       const { error: draftError } = await supabase.from('products').upsert([{
         id,
         vendor_id: user.id,
-        original_image_url: imageUrl,
-        studio_image_url: imageUrl,
+        original_image_url: hqUrl,
+        studio_image_url: displayUrl,
         title: 'Draft product',
         status: 'draft',
         updated_at: new Date().toISOString(),
       }]);
       if (draftError) throw draftError;
       setDraftId(id);
-      setCapturedImage(imageUrl);
+      setOriginalImageUrl(hqUrl);
+      setCapturedImage(hqUrl);
+      setEnhancedImageUrl(null);
+      setEnhancementStatus('idle');
       setSuccess('Photo saved. Add a few notes about the piece.');
       setStep(2);
     } catch {
@@ -118,11 +149,14 @@ const SimplifiedListingWizard: React.FC = () => {
   };
 
   const improvePhoto = async () => {
-    if (!draftId || !capturedImage) return;
+    const sourceUrl = originalImageUrl || capturedImage;
+    if (!draftId || !sourceUrl || enhancementStatus === 'processing') return;
     setEnhancementStatus('processing');
     setError('');
     try {
-      const url = await enhanceImageClientSide(draftId, capturedImage);
+      const url = await enhanceImageClientSide(draftId, sourceUrl, {
+        productCategory: conversationState.category || null,
+      });
       setEnhancedImageUrl(url);
       setEnhancementStatus('completed');
     } catch {
@@ -140,6 +174,7 @@ const SimplifiedListingWizard: React.FC = () => {
     }
     setCapturedImage(url);
     setEnhancedImageUrl(null);
+    setEnhancementStatus('idle');
     setStep(2);
   };
 
@@ -210,7 +245,7 @@ const SimplifiedListingWizard: React.FC = () => {
         )}
         {step === 2 && draftId && (
           <section className="listing-conversation grid gap-12 lg:grid-cols-[0.9fr_1.1fr]">
-            <div className="space-y-6"><ImageFrame src={enhancedImageUrl || capturedImage} alt="Product preview" label="Your piece" className="aspect-[4/3]" />{enhancementStatus === 'completed' && enhancedImageUrl ? <div className="flex gap-5"><Button variant="light" onClick={() => void saveImageChoice(capturedImage || '')}>Keep original</Button><Button onClick={() => void saveImageChoice(enhancedImageUrl)}>Use improved image</Button></div> : <button type="button" onClick={() => void improvePhoto()} disabled={enhancementStatus === 'processing'} className="text-xs font-semibold uppercase tracking-[0.16em] text-stone-600 underline decoration-stone-300 underline-offset-4 hover:text-stone-950">{enhancementStatus === 'processing' ? 'Improving image' : 'Improve image'}</button>}</div>
+            <div className="space-y-6"><ImageFrame src={enhancedImageUrl || capturedImage} alt="Product preview" label="Your piece" className="aspect-[4/3]" />{enhancementStatus === 'completed' && enhancedImageUrl ? <div className="flex gap-5"><Button variant="light" onClick={() => void saveImageChoice(originalImageUrl || capturedImage || '')}>Keep original</Button><Button onClick={() => void saveImageChoice(enhancedImageUrl)}>Use improved image</Button></div> : <button type="button" onClick={() => void improvePhoto()} disabled={enhancementStatus === 'processing'} className="text-xs font-semibold uppercase tracking-[0.16em] text-stone-600 underline decoration-stone-300 underline-offset-4 hover:text-stone-950">{enhancementStatus === 'processing' ? 'Improving image' : 'Improve image'}</button>}</div>
             <div><Eyebrow>Describe</Eyebrow><h2 className="mt-4 font-display text-5xl leading-none">Tell us about it.</h2><p className="mt-5 mb-8 max-w-md text-sm leading-7 text-stone-600">Speak or write naturally. The catalog notes will remain editable.</p><ConversationalCataloger productId={draftId} selectedLanguage="en" productImageUrl={capturedImage} initialConversationState={conversationState} initialAssistantMessage="What would you like people to know about this piece?" onConversationUpdate={updateFromConversation} onComplete={updateFromConversation} /><div className="mt-8 flex gap-5"><Button variant="light" onClick={() => setStep(1)}>Back</Button><Button disabled={!conversationState.conversationComplete} onClick={() => setStep(3)} className="flex-1 justify-between">Review <ArrowRight className="h-4 w-4" strokeWidth={1.5} /></Button></div></div>
           </section>
         )}

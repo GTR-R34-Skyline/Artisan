@@ -40,4 +40,24 @@ describe('enhanceImageClientSide', () => {
     });
     expect(result).toBe('https://example.com/enhanced.jpg');
   });
+
+  it('forwards an optional product category hint to the edge function', async () => {
+    invokeMock.mockResolvedValue({
+      data: { enhancedImageUrl: 'https://example.com/enhanced.png' },
+      error: null,
+    });
+
+    const { enhanceImageClientSide } = await import('./imageEnhancement');
+    await enhanceImageClientSide('prod-456', 'https://example.com/original.png', {
+      productCategory: 'jewellery',
+    });
+
+    expect(invokeMock).toHaveBeenCalledWith('enhance-image', {
+      body: {
+        productId: 'prod-456',
+        originalImageUrl: 'https://example.com/original.png',
+        productCategory: 'jewellery',
+      },
+    });
+  });
 });

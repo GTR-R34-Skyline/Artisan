@@ -6,16 +6,187 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-const GEMINI_IMAGE_MODEL = Deno.env.get('GEMINI_IMAGE_MODEL') || 'gemini-3.1-flash-image';
-const GEMINI_API_KEY = Deno.env.get('GEMINI_API_KEY');
+const PHOTOROOM_API_KEY = Deno.env.get('PHOTOROOM_API_KEY');
+const PHOTOROOM_EDIT_URL = 'https://image-api.photoroom.com/v2/edit';
+
+/** Marketplace product cards commonly use 4:3 (see ImageFrame aspect-[4/3]). */
+const OUTPUT_SIZE = '1600x1200';
+const MAX_INPUT_BYTES = 7 * 1024 * 1024;
+const MAX_OUTPUT_BYTES = 12 * 1024 * 1024;
+const MAX_PHOTOROOM_ATTEMPTS = 2;
+const ALLOWED_INPUT_MIME = new Set(['image/jpeg', 'image/png', 'image/webp']);
+const ALLOWED_OUTPUT_MIME = new Set(['image/jpeg', 'image/png', 'image/webp']);
+
+const normalizeMimeType = (value: string | null | undefined, fallback = 'image/jpeg'): string => {
+  if (!value) return fallback;
+  const mime = value.split(';')[0].trim().toLowerCase();
+  if (mime === 'image/jpg') return 'image/jpeg';
+  return mime;
+};
+
+const extensionForMime = (mimeType: string): string => {
+  switch (mimeType) {
+    case 'image/jpeg':
+      return 'jpg';
+    case 'image/png':
+      return 'png';
+    case 'image/webp':
+      return 'webp';
+    default:
+      return 'jpg';
+  }
+};
+
+const filenameForMime = (mimeType: string): string => `product.${extensionForMime(mimeType)}`;
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const isTransientStatus = (status: number): boolean =>
+  status === 429 || status === 502 || status === 503 || status === 504;
+
+const markEnhancementStatus = async (
+  adminClient: ReturnType<typeof createClient>,
+  productId: string,
+  status: 'processing' | 'completed' | 'failed',
+  extra: Record<string, unknown> = {}
+) => {
+  const { error } = await adminClient
+    .from('products')
+    .update({
+      enhancement_status: status,
+      updated_at: new Date().toISOString(),
+      ...extra,
+    })
+    .eq('id', productId);
+
+  if (error) {
+    throw new Error(`Failed to update enhancement status: ${error.message}`);
+  }
+};
+
+const safeClientError = (message: string): string => {
+  // Never leak credentials, raw upstream payloads, or internal identifiers.
+  if (/api[_ -]?key|x-api-key|service[_ -]?role|sk_pr_|bearer\s|authorization:|stack trace/i.test(message)) {
+    return 'Image enhancement failed. Please try again or continue with the original.';
+  }
+  return message || 'Image enhancement failed. Please try again or continue with the original.';
+};
+
+/**
+ * Conservative e-commerce edit via Photoroom Image Editing API.
+ * Fidelity-first: preserve product colors/details; clean white BG; soft studio framing.
+ * Intentionally avoids beautify / AI backgrounds / upscale / generative redesign.
+ */
+const callPhotoroomEdit = async (
+  imageBytes: Uint8Array,
+  inputMime: string
+): Promise<{ bytes: Uint8Array; mimeType: string }> => {
+  if (!PHOTOROOM_API_KEY) {
+    throw new Error('Image enhancement is unavailable. Missing Photoroom secret.');
+  }
+
+  let lastError: Error | null = null;
+
+  for (let attempt = 1; attempt <= MAX_PHOTOROOM_ATTEMPTS; attempt += 1) {
+    try {
+      const form = new FormData();
+      form.append(
+        'imageFile',
+        new Blob([imageBytes], { type: inputMime }),
+        filenameForMime(inputMime)
+      );
+      form.append('removeBackground', 'true');
+      form.append('background.color', 'FFFFFF');
+      form.append('lighting.mode', 'ai.preserve-hue-and-saturation');
+      form.append('shadow.mode', 'ai.soft');
+      form.append('padding', '0.1');
+      form.append('outputSize', OUTPUT_SIZE);
+      form.append('horizontalAlignment', 'center');
+      form.append('verticalAlignment', 'center');
+      form.append('export.format', 'jpeg');
+
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 60_000);
+
+      const response = await fetch(PHOTOROOM_EDIT_URL, {
+        method: 'POST',
+        headers: {
+          'x-api-key': PHOTOROOM_API_KEY,
+          'pr-hd-background-removal': 'auto',
+        },
+        body: form,
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        const errBody = await response.text().catch(() => '');
+        console.error(`Photoroom API error (attempt ${attempt}):`, response.status, errBody.slice(0, 300));
+
+        if (response.status === 429) {
+          lastError = new Error('Image enhancement is temporarily busy. Please try again in a moment.');
+        } else if (response.status >= 500) {
+          lastError = new Error('Image enhancement service failed. Please try again.');
+        } else if (response.status === 401 || response.status === 403) {
+          lastError = new Error('Image enhancement is unavailable.');
+        } else {
+          lastError = new Error('The photograph could not be improved. Please try another image or continue with the original.');
+        }
+
+        if (isTransientStatus(response.status) && attempt < MAX_PHOTOROOM_ATTEMPTS) {
+          await sleep(500 * attempt);
+          continue;
+        }
+        throw lastError;
+      }
+
+      const contentType = normalizeMimeType(response.headers.get('content-type'), 'image/jpeg');
+      if (!ALLOWED_OUTPUT_MIME.has(contentType) && !contentType.startsWith('image/')) {
+        throw new Error('Image enhancement returned an unexpected response.');
+      }
+
+      const resultBuffer = new Uint8Array(await response.arrayBuffer());
+      if (resultBuffer.byteLength === 0) {
+        throw new Error('Image enhancement returned an empty image.');
+      }
+      if (resultBuffer.byteLength > MAX_OUTPUT_BYTES) {
+        throw new Error('Enhanced image was unexpectedly large.');
+      }
+
+      const mimeType = ALLOWED_OUTPUT_MIME.has(contentType) ? contentType : 'image/jpeg';
+      return { bytes: resultBuffer, mimeType };
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        lastError = new Error('Image enhancement timed out. Please try again.');
+      } else {
+        lastError = error instanceof Error ? error : new Error('Image enhancement failed.');
+      }
+
+      const retryable =
+        /timed out|temporarily busy|service failed|network|fetch/i.test(lastError.message);
+      if (retryable && attempt < MAX_PHOTOROOM_ATTEMPTS) {
+        await sleep(500 * attempt);
+        continue;
+      }
+      throw lastError;
+    }
+  }
+
+  throw lastError || new Error('Image enhancement failed.');
+};
 
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders });
   }
 
+  let productId: string | null = null;
+
   try {
-    const { productId, originalImageUrl } = await req.json();
+    const body = await req.json();
+    productId = typeof body.productId === 'string' ? body.productId : null;
+    const originalImageUrl = typeof body.originalImageUrl === 'string' ? body.originalImageUrl : null;
 
     if (!productId || !originalImageUrl) {
       return new Response(JSON.stringify({ error: 'Missing productId or originalImageUrl' }), {
@@ -24,17 +195,21 @@ serve(async (req) => {
       });
     }
 
-    if (!GEMINI_API_KEY) {
-      return new Response(JSON.stringify({ error: 'Image enhancement is unavailable. Missing Gemini secret.' }), {
-        status: 500,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      });
+    if (!PHOTOROOM_API_KEY) {
+      return new Response(
+        JSON.stringify({ error: 'Image enhancement is unavailable. Missing Photoroom secret.' }),
+        {
+          status: 500,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        }
+      );
     }
 
     const supabaseUrl = Deno.env.get('SUPABASE_URL') || '';
     const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
+    const anonKey = Deno.env.get('SUPABASE_ANON_KEY') || '';
 
-    if (!supabaseUrl || !serviceRoleKey) {
+    if (!supabaseUrl || !serviceRoleKey || !anonKey) {
       return new Response(JSON.stringify({ error: 'Server configuration is incomplete.' }), {
         status: 500,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -42,122 +217,28 @@ serve(async (req) => {
     }
 
     const adminClient = createClient(supabaseUrl, serviceRoleKey);
-
-    const { error: initialUpdateError } = await adminClient
-      .from('products')
-      .update({
-        enhancement_status: 'processing',
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', productId);
-
-    if (initialUpdateError) {
-      throw new Error(`Failed to mark product as processing: ${initialUpdateError.message}`);
-    }
+    await markEnhancementStatus(adminClient, productId, 'processing');
 
     const imageFetch = await fetch(originalImageUrl);
     if (!imageFetch.ok) {
-      throw new Error(`Could not download the original image: ${imageFetch.status}`);
+      throw new Error('Could not download the original image.');
     }
 
-    const blob = await imageFetch.blob();
-    const mimeType = blob.type || 'image/jpeg';
-    const base64Data = await new Promise<string>((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        const result = typeof reader.result === 'string' ? reader.result : '';
-        const data = result.includes(',') ? result.split(',')[1] : result;
-        if (!data) {
-          reject(new Error('Failed to convert image to base64.'));
-          return;
-        }
-        resolve(data);
-      };
-      reader.onerror = () => reject(new Error('Failed to read image file.'));
-      reader.readAsDataURL(blob);
-    });
-
-    const promptText = `Enhance this product photograph for use in an online marketplace.
-
-Preserve the exact identity, shape, proportions, colors, texture, materials, patterns, labels, logos, and visible details of the original product.
-
-Improve photographic quality only:
-* improve exposure
-* correct lighting
-* improve white balance
-* reduce noise
-* reduce blur when possible
-* improve clarity and sharpness
-* improve contrast naturally
-* improve overall visual quality
-* make the product look clean and professional
-
-Preserve the original composition and camera perspective.
-
-Do not redesign, replace, reshape, recolor, or invent any part of the product.
-
-Do not add objects, decorations, backgrounds, text, logos, watermarks, or accessories.
-
-Do not remove genuine product details.
-
-The result must remain a faithful representation of the original uploaded product photograph.`;
-
-    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_IMAGE_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
-    const geminiRes = await fetch(geminiUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              { text: promptText },
-              {
-                inlineData: {
-                  mimeType,
-                  data: base64Data,
-                },
-              },
-            ],
-          },
-        ],
-      }),
-    });
-
-    if (!geminiRes.ok) {
-      const errText = await geminiRes.text();
-      throw new Error(`Gemini API failed: ${errText}`);
+    const sourceBytes = new Uint8Array(await imageFetch.arrayBuffer());
+    if (sourceBytes.byteLength === 0) {
+      throw new Error('Original image was empty.');
+    }
+    if (sourceBytes.byteLength > MAX_INPUT_BYTES) {
+      throw new Error('Original image is too large to enhance. Please upload a smaller photograph.');
     }
 
-    const geminiData = await geminiRes.json();
-    const parts = geminiData?.candidates?.[0]?.content?.parts || [];
-    let enhancedBase64: string | undefined;
-    let enhancedMimeType = mimeType;
+    const headerMime = normalizeMimeType(imageFetch.headers.get('content-type'));
+    const inputMime = ALLOWED_INPUT_MIME.has(headerMime) ? headerMime : 'image/jpeg';
 
-    for (const part of parts) {
-      if (part.inlineData) {
-        enhancedBase64 = part.inlineData.data;
-        if (part.inlineData.mimeType) {
-          enhancedMimeType = part.inlineData.mimeType;
-        }
-        break;
-      }
-    }
-
-    if (!enhancedBase64) {
-      throw new Error('Gemini did not return an enhanced image.');
-    }
-
-    const binaryString = atob(enhancedBase64);
-    const len = binaryString.length;
-    const bytes = new Uint8Array(len);
-    for (let i = 0; i < len; i += 1) {
-      bytes[i] = binaryString.charCodeAt(i);
-    }
-    const enhancedBlob = new Blob([bytes], { type: enhancedMimeType });
+    const processed = await callPhotoroomEdit(sourceBytes, inputMime);
 
     const authHeader = req.headers.get('Authorization');
-    const userClient = createClient(supabaseUrl, Deno.env.get('SUPABASE_ANON_KEY') || '', {
+    const userClient = createClient(supabaseUrl, anonKey, {
       global: { headers: { Authorization: authHeader || '' } },
     });
     const { data: userData, error: userError } = await userClient.auth.getUser();
@@ -165,13 +246,14 @@ The result must remain a faithful representation of the original uploaded produc
       throw new Error('Unauthorized user credentials');
     }
 
-    const fileExt = originalImageUrl.split('?')[0].split('.').pop() || 'jpg';
+    const fileExt = extensionForMime(processed.mimeType);
     const enhancedStoragePath = `enhanced/${userData.user.id}/${productId}/${Date.now()}.${fileExt}`;
+    const enhancedBlob = new Blob([processed.bytes], { type: processed.mimeType });
 
     const { error: uploadError } = await adminClient.storage
       .from('marketplace-images')
       .upload(enhancedStoragePath, enhancedBlob, {
-        contentType: enhancedMimeType,
+        contentType: processed.mimeType,
         upsert: true,
       });
 
@@ -185,18 +267,9 @@ The result must remain a faithful representation of the original uploaded produc
 
     const enhancedImageUrl = publicUrlData.publicUrl;
 
-    const { error: dbUpdateError } = await adminClient
-      .from('products')
-      .update({
-        enhanced_image_url: enhancedImageUrl,
-        enhancement_status: 'completed',
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', productId);
-
-    if (dbUpdateError) {
-      throw new Error(`Failed to save enhanced image URL: ${dbUpdateError.message}`);
-    }
+    await markEnhancementStatus(adminClient, productId, 'completed', {
+      enhanced_image_url: enhancedImageUrl,
+    });
 
     return new Response(JSON.stringify({ enhancedImageUrl }), {
       status: 200,
@@ -205,25 +278,21 @@ The result must remain a faithful representation of the original uploaded produc
   } catch (error) {
     console.error('Enhancement error:', error);
 
-    const body = await req.clone().json().catch(() => ({})) as { productId?: unknown };
-    const productId = typeof body.productId === 'string' ? body.productId : null;
-
     if (productId) {
       const supabaseUrl = Deno.env.get('SUPABASE_URL') || '';
       const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
       if (supabaseUrl && serviceRoleKey) {
         const adminClient = createClient(supabaseUrl, serviceRoleKey);
-        await adminClient
-          .from('products')
-          .update({
-            enhancement_status: 'failed',
-            updated_at: new Date().toISOString(),
-          })
-          .eq('id', productId);
+        try {
+          await markEnhancementStatus(adminClient, productId, 'failed');
+        } catch (statusError) {
+          console.error('Failed to mark enhancement as failed:', statusError);
+        }
       }
     }
 
-    return new Response(JSON.stringify({ error: error?.message || 'Image enhancement failed.' }), {
+    const message = error instanceof Error ? error.message : 'Image enhancement failed.';
+    return new Response(JSON.stringify({ error: safeClientError(message) }), {
       status: 500,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
