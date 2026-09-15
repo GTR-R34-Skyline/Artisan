@@ -75,6 +75,16 @@ export const synthesizeWithCartesia = async (
   const voiceId = Deno.env.get('CARTESIA_VOICE_ID');
   if (!apiKey || !voiceId) throw new Error('Voice response service is not configured on the server.');
 
+  // Cartesia sentence segmentation follows ASCII .?! — Devanagari danda (।) often truncates audio.
+  const normalizedTranscript = transcript
+    .replace(/\u0964/g, '.')
+    .replace(/\u0965/g, '.')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!normalizedTranscript) {
+    throw new Error('Cartesia transcript was empty after normalization.');
+  }
+
   const modelId = Deno.env.get('CARTESIA_MODEL') || 'sonic-3.5';
   const response = await fetch('https://api.cartesia.ai/tts/bytes', {
     method: 'POST',
@@ -85,7 +95,7 @@ export const synthesizeWithCartesia = async (
     },
     body: JSON.stringify({
       model_id: modelId,
-      transcript,
+      transcript: normalizedTranscript,
       voice: { mode: 'id', id: voiceId },
       language: CARTESIA_LANGUAGE[selectedLanguage],
       output_format: { container: 'mp3', sample_rate: 44100, bit_rate: 128000 },

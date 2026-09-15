@@ -6,6 +6,7 @@ import { AuthProvider } from './auth/useAuth';
 import { useAuth } from './auth/useAuthHook';
 import { RoleRoute } from './auth/RoleRoute';
 import { CartProvider } from './context/CartContext';
+import { LocaleProvider, useLocale } from './i18n/LocaleContext';
 
 const HomePage = lazy(() => import('./pages/HomePage'));
 const MarketplacePage = lazy(() => import('./pages/MarketplacePage'));
@@ -23,11 +24,14 @@ const ShipmentDetailPage = lazy(() => import('./pages/courier/ShipmentDetailPage
 const VendorOnboarding = lazy(() => import('./components/VendorOnboarding').then((module) => ({ default: module.VendorOnboarding })));
 const SimplifiedListingWizard = lazy(() => import('./pages/vendor/SimplifiedListingWizard').then((module) => ({ default: module.SimplifiedListingWizard })));
 
-const PageLoader: React.FC = () => (
-  <div className="mx-auto flex min-h-[50vh] max-w-[1400px] items-center px-6 lg:px-10">
-    <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-stone-500">Opening ARTISAN</p>
-  </div>
-);
+const PageLoader: React.FC = () => {
+  const { t } = useLocale();
+  return (
+    <div className="mx-auto flex min-h-[50vh] max-w-[1400px] items-center px-6 lg:px-10">
+      <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-stone-500">{t('loading.opening')}</p>
+    </div>
+  );
+};
 
 const AppContent: React.FC = () => {
   const { logout } = useAuth();
@@ -119,9 +123,11 @@ const AppContent: React.FC = () => {
 
 const App: React.FC = () => (
   <AuthProvider>
-    <CartProvider>
-      <AppContent />
-    </CartProvider>
+    <LocaleProvider>
+      <CartProvider>
+        <AppContent />
+      </CartProvider>
+    </LocaleProvider>
   </AuthProvider>
 );
 

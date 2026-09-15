@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { ArrowUpRight } from 'lucide-react';
 import { ArrowButton, Eyebrow, ImageFrame, SectionHeading } from '../components/DesignSystem';
 import { Card, Carousel } from '../components/ui/apple-cards-carousel';
+import { useLocale } from '../i18n/LocaleContext';
 import { getMarketplaceListings } from '../services/marketplace.service';
 import { MarketplaceListing } from '../types/marketplace';
 
@@ -41,6 +42,7 @@ const homepageCards = [
 
 const HomePage: React.FC = () => {
   const [listings, setListings] = useState<MarketplaceListing[]>([]);
+  const { t } = useLocale();
 
   useEffect(() => {
     getMarketplaceListings()
@@ -56,18 +58,18 @@ const HomePage: React.FC = () => {
     <div className="home-page">
       <section className="editorial-hero mx-auto grid max-w-[1400px] gap-12 px-6 pb-28 pt-16 lg:grid-cols-[0.85fr_1.15fr] lg:items-end lg:px-10 lg:pb-36 lg:pt-24">
         <div className="max-w-xl space-y-9">
-          <Eyebrow>Independent makers · Across India</Eyebrow>
+          <Eyebrow>{t('home.eyebrow')}</Eyebrow>
           <h1 className="hero-title font-display text-6xl leading-[0.9] tracking-[-0.055em] text-stone-950 sm:text-8xl">
-            Bring your
+            {t('home.title.line1')}
             <br />
-            craft online.
+            {t('home.title.line2')}
           </h1>
           <p className="max-w-md text-base leading-7 text-stone-600">
-            A carefully considered digital home for independent artisans and the work they carry forward.
+            {t('home.subtitle')}
           </p>
           <div className="flex flex-wrap items-center gap-7 pt-2">
-            <ArrowButton to="/marketplace">Explore the collection</ArrowButton>
-            <ArrowButton to="/join" className="text-stone-500">Join ARTISAN</ArrowButton>
+            <ArrowButton to="/marketplace">{t('home.cta.explore')}</ArrowButton>
+            <ArrowButton to="/join" className="text-stone-500">{t('home.cta.join')}</ArrowButton>
           </div>
         </div>
 
@@ -75,11 +77,11 @@ const HomePage: React.FC = () => {
           <ImageFrame
             src="/images/folk-elephants.png"
             alt="Colorfully painted folk elephants in a craft collection"
-            label="Painted stories"
+            label={t('home.heroLabel')}
             className="hero-image-frame aspect-[4/3] w-full"
           />
           <div className="absolute -bottom-7 left-6 border-l border-stone-950 bg-ivory px-5 py-2 lg:left-0">
-            <Eyebrow>Stories in color</Eyebrow>
+            <Eyebrow>{t('home.heroLabel')}</Eyebrow>
           </div>
         </div>
       </section>

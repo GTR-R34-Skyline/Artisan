@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowRight, Check, Edit3, Loader2, Mic, Square } from 'lucide-react';
+import { Check, Edit3, Loader2, Mic, Square } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { ArrowButton, Button, Eyebrow, Field } from './DesignSystem';
 import { useAuth } from '../auth/useAuthHook';
@@ -10,6 +10,8 @@ import { createProfileVoiceStt, sendProfileVoiceTurn, startProfileVoicePipeline 
 import { VoiceTurnTimer } from '../services/profileVoiceTiming';
 import { VoiceTurnMachine } from '../services/voiceTurnMachine';
 import { LocalVoiceStatusNotice } from './LocalVoiceStatusNotice';
+import ProfilePhotoUpload from './ProfilePhotoUpload';
+import LanguagePreferenceButtons from './LanguagePreferenceButtons';
 import {
   ArtisanProfileState,
   createInitialProfileState,
@@ -17,30 +19,43 @@ import {
   ProfileConversationResponse,
 } from '../types/profileConversation';
 import { SupportedLanguageCode } from '../types/catalogConversation';
-import { SUPPORTED_LANGUAGES } from '../utils/languages';
+import { LANGUAGE_CONFIG, isSupportedLanguageCode } from '../utils/languages';
+import { useLocale } from '../i18n/LocaleContext';
+import {
+  VENDOR_ONBOARDING_FIELD_KEYS,
+  buildOnboardingRequirementsMessage,
+} from '../i18n/translations';
 
 type OnboardingStatus = 'language_selection' | 'idle' | 'listening' | 'processing' | 'asking_followup' | 'review' | 'submitted' | 'manual';
 const MAX_RECORDING_SECONDS = 45;
+const VENDOR_REQUIRED_FIELDS = ['name', 'location', 'craft', 'experienceYears', 'story'] as const;
 
 const mergeProfileState = (state: ArtisanProfileState, response: ProfileConversationResponse, language: SupportedLanguageCode): ArtisanProfileState => {
   const next = {
     ...state,
     ...(Object.fromEntries(
-      Object.entries(response.extractedFields).filter(([, value]) =>
-        (typeof value === 'string' && value.trim().length > 0)
-        || (typeof value === 'number' && Number.isFinite(value))),
+      Object.entries(response.extractedFields).filter(([key, value]) =>
+        key !== 'languagesSpoken'
+        && key !== 'completedFields'
+        && key !== 'missingRequiredFields'
+        && key !== 'conversationComplete'
+        && key !== 'confidence'
+        && ((typeof value === 'string' && value.trim().length > 0)
+          || (typeof value === 'number' && Number.isFinite(value)))),
     ) as Partial<ArtisanProfileState>),
     skills: response.extractedFields.skills?.length ? response.extractedFields.skills : state.skills,
     materials: response.extractedFields.materials?.length ? response.extractedFields.materials : state.materials,
     specialties: response.extractedFields.specialties?.length ? response.extractedFields.specialties : state.specialties,
     products: response.extractedFields.products?.length ? response.extractedFields.products : state.products,
     productionMethods: response.extractedFields.productionMethods?.length ? response.extractedFields.productionMethods : state.productionMethods,
-    languagesSpoken: Array.from(new Set([...(state.languagesSpoken || []), ...(response.extractedFields.languagesSpoken || []), language])),
+    languagesSpoken: Array.from(new Set([...(state.languagesSpoken || []), language])),
     confidence: { ...state.confidence, ...response.confidence },
     missingRequiredFields: response.missingRequiredFields,
     conversationComplete: response.conversationComplete,
   };
-  next.completedFields = ['name', 'location', 'craft', 'experienceYears', 'story'].filter((field) => !next.missingRequiredFields.includes(field));
+  next.missingRequiredFields = VENDOR_REQUIRED_FIELDS.filter((field) => next.missingRequiredFields.includes(field));
+  next.completedFields = VENDOR_REQUIRED_FIELDS.filter((field) => !next.missingRequiredFields.includes(field));
+  next.conversationComplete = next.missingRequiredFields.length === 0;
   return next;
 };
 
@@ -52,13 +67,11 @@ const profileFieldValue = (value: string | number | string[] | null | undefined)
 const VendorOnboarding: React.FC = () => {
   const navigate = useNavigate();
   const { user, profile, fetchProfile } = useAuth();
-  const [selectedLanguage, setSelectedLanguage] = useState<SupportedLanguageCode | null>(() => {
-    const stored = sessionStorage.getItem('artisan_onboarding_language');
-    return stored && SUPPORTED_LANGUAGES.map((language) => language.code).includes(stored as SupportedLanguageCode) ? stored as SupportedLanguageCode : null;
-  });
-  const [profileState, setProfileState] = useState<ArtisanProfileState>(() => createInitialProfileState());
-  const [status, setStatus] = useState<OnboardingStatus>(() => (sessionStorage.getItem('artisan_onboarding_language') ? 'idle' : 'language_selection'));
-  const [assistantMessage, setAssistantMessage] = useState('Welcome. Let’s get your craft online. Tell us about yourself.');
+  const { setLanguage, t } = useLocale();
+  const [selectedLanguage, setSelectedLanguage] = useState<SupportedLanguageCode | null>(null);
+  const [profileState, setProfileState] = useState<ArtisanProfileState>(() => createInitialProfileState(undefined, false));
+  const [status, setStatus] = useState<OnboardingStatus>('language_selection');
+  const [assistantMessage, setAssistantMessage] = useState('');
   const [lastTranscript, setLastTranscript] = useState('');
   const [interimTranscript, setInterimTranscript] = useState('');
   const [manualResponse, setManualResponse] = useState('');
@@ -66,6 +79,7 @@ const VendorOnboarding: React.FC = () => {
   const [editing, setEditing] = useState(false);
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [profileImageUrl, setProfileImageUrl] = useState<string | null>(null);
   const startedAtRef = useRef(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -77,6 +91,11 @@ const VendorOnboarding: React.FC = () => {
   const abortControllerRef = useRef<AbortController | null>(null);
   const audioPlayerRef = useRef(new ProgressiveAudioPlayer());
   const turnMachineRef = useRef(new VoiceTurnMachine());
+  const profileStateRef = useRef(profileState);
+
+  useEffect(() => {
+    profileStateRef.current = profileState;
+  }, [profileState]);
 
   useEffect(() => {
     startProfileVoicePipeline();
@@ -85,13 +104,21 @@ const VendorOnboarding: React.FC = () => {
   useEffect(() => {
     if (!profile || hydratedRef.current) return;
     hydratedRef.current = true;
+    const preferred = profile.preferred_language;
+    if (preferred && isSupportedLanguageCode(preferred)) {
+      setSelectedLanguage(preferred);
+      setLanguage(preferred);
+      sessionStorage.setItem('artisan_onboarding_language', preferred);
+      setAssistantMessage(buildOnboardingRequirementsMessage(preferred, VENDOR_ONBOARDING_FIELD_KEYS));
+      setStatus('idle');
+    }
     setProfileState((state) => ({
       ...state,
       name: profile.full_name || state.name,
       location: profile.location_state || state.location,
-      languagesSpoken: profile.preferred_language ? [profile.preferred_language] : state.languagesSpoken,
+      languagesSpoken: preferred && isSupportedLanguageCode(preferred) ? [preferred] : state.languagesSpoken,
     }));
-  }, [profile]);
+  }, [profile, setLanguage]);
 
   useEffect(() => {
     if (!profile) return undefined;
@@ -178,6 +205,8 @@ const VendorOnboarding: React.FC = () => {
       );
 
       if (turnGeneration !== turnGenerationRef.current) return;
+
+      audioPlayerRef.current.markStreamComplete(turnGeneration);
 
       const nextState = mergeProfileState(profileState, response, language);
       setProfileState(nextState);
@@ -328,13 +357,41 @@ const VendorOnboarding: React.FC = () => {
     }
   }, [clearRecording, clearRecordingTimer, selectedLanguage, stopListeningAndSubmit]);
 
-  const chooseLanguage = (language: SupportedLanguageCode) => {
+  const chooseLanguage = async (language: SupportedLanguageCode, options: { preserveProfile?: boolean } = {}) => {
     setSelectedLanguage(language);
+    setLanguage(language);
     sessionStorage.setItem('artisan_onboarding_language', language);
-    setProfileState((state) => ({ ...state, languagesSpoken: Array.from(new Set([...state.languagesSpoken, language])) }));
-    setAssistantMessage('Tell us about yourself. You can speak naturally.');
+    if (user?.id) {
+      try {
+        await supabase.from('profiles').update({ preferred_language: language }).eq('id', user.id);
+        await fetchProfile(user.id);
+      } catch {
+        // Keep local selection even if persistence fails; submit will retry.
+      }
+    }
+    if (!options.preserveProfile) {
+      setProfileState((state) => ({
+        ...createInitialProfileState(language, false),
+        name: state.name || profile?.full_name || null,
+        location: state.location || profile?.location_state || null,
+        languagesSpoken: [language],
+      }));
+      setAssistantMessage(buildOnboardingRequirementsMessage(language, VENDOR_ONBOARDING_FIELD_KEYS));
+      turnMachineRef.current.set('IDLE', { language });
+      setStatus('idle');
+      return;
+    }
+    setProfileState((state) => ({
+      ...state,
+      languagesSpoken: Array.from(new Set([language, ...state.languagesSpoken])),
+    }));
+    if (!profileStateRef.current.conversationComplete && profileStateRef.current.missingRequiredFields.length) {
+      setAssistantMessage(buildOnboardingRequirementsMessage(language, profileStateRef.current.missingRequiredFields));
+    } else if (!profileStateRef.current.conversationComplete && profileStateRef.current.completedFields.length === 0) {
+      setAssistantMessage(buildOnboardingRequirementsMessage(language, VENDOR_ONBOARDING_FIELD_KEYS));
+    }
     turnMachineRef.current.set('IDLE', { language });
-    setStatus('idle');
+    if (status === 'language_selection') setStatus('idle');
   };
 
   const submitManual = () => {
@@ -381,6 +438,7 @@ const VendorOnboarding: React.FC = () => {
         languages: profileState.languagesSpoken,
         experience_years: profileState.experienceYears,
         location: profileState.location,
+        profile_image_url: profileImageUrl || null,
         status: 'pending',
       }]);
       if (applicationError) throw applicationError;
@@ -395,52 +453,51 @@ const VendorOnboarding: React.FC = () => {
   };
 
   const statusCopy: Record<OnboardingStatus, string> = {
-    language_selection: 'Choose a spoken language',
-    idle: 'Ready when you are',
-    listening: 'Listening…',
-    processing: 'Understanding…',
-    asking_followup: 'One more thing…',
-    review: 'Your profile is ready to review.',
-    submitted: 'Profile submitted',
-    manual: 'Continue manually',
+    language_selection: t('onboarding.chooseLanguage'),
+    idle: t('onboarding.speakNaturally'),
+    listening: t('onboarding.listening'),
+    processing: t('onboarding.understanding'),
+    asking_followup: t('onboarding.speakNaturally'),
+    review: t('onboarding.readyReview'),
+    submitted: t('onboarding.applicationReceived'),
+    manual: t('onboarding.typeInstead'),
   };
 
   if (status === 'submitted') {
     return (
       <div className="success-panel mx-auto max-w-3xl border-y border-stone-300 py-20">
-        <Eyebrow>Thank you</Eyebrow>
-        <h1 className="mt-5 font-display text-6xl leading-[0.9] tracking-[-0.05em] sm:text-8xl">Your story is ready.</h1>
-        <p className="mt-6 max-w-md text-sm leading-7 text-stone-600">Your profile has been sent for review. You can begin preparing your first piece while we take a look.</p>
+        <Eyebrow>{t('onboarding.applicationReceived')}</Eyebrow>
+        <h1 className="mt-5 font-display text-6xl leading-[0.9] tracking-[-0.05em] sm:text-8xl">{t('onboarding.onItsWay')}</h1>
+        <p className="mt-6 max-w-md text-sm leading-7 text-stone-600">{t('onboarding.reviewSoon')}</p>
         <ArrowButton to="/vendor/wizard" className="mt-9">Create a piece</ArrowButton>
       </div>
     );
   }
 
-  if (status === 'language_selection') {
+  if (status === 'language_selection' || !selectedLanguage) {
     return (
-      <div className="onboarding-page mx-auto grid max-w-4xl gap-12 py-12 lg:grid-cols-[0.65fr_1fr] lg:py-24">
+      <div className="onboarding-page mx-auto grid max-w-5xl gap-14 px-6 py-10 lg:grid-cols-[0.7fr_1fr] lg:px-10 lg:py-24">
         <div className="border-t border-stone-300 pt-7">
-          <Eyebrow>Begin here</Eyebrow>
-          <h1 className="mt-5 font-display text-6xl leading-[0.9] tracking-[-0.05em] sm:text-7xl">Let’s make room for your voice.</h1>
-          <p className="mt-6 max-w-sm text-sm leading-7 text-stone-600">The interface stays in English. Your spoken language guides the conversation.</p>
+          <Eyebrow>{t('onboarding.voiceIntro')}</Eyebrow>
+          <h1 className="mt-5 max-w-md font-display text-6xl leading-[0.9] tracking-[-0.05em] sm:text-8xl">{t('onboarding.makeRoom')}</h1>
+          <p className="mt-7 max-w-sm text-sm leading-7 text-stone-600">{t('onboarding.languagePrompt')}</p>
           <div className="mt-8">
             <LocalVoiceStatusNotice />
           </div>
         </div>
         <div className="border-y border-stone-300 py-7">
-          <Eyebrow>One choice</Eyebrow>
-          <h2 className="mt-4 font-display text-4xl">Which language would you like to speak?</h2>
-          <div className="mt-10 border-t border-stone-300">
-            {SUPPORTED_LANGUAGES.map((languageConfig) => {
-              const language = languageConfig.code;
-              return (
-              <button key={language} type="button" onClick={() => chooseLanguage(language)} className="flex w-full items-center justify-between border-b border-stone-300 py-5 text-left text-sm text-stone-950 transition-colors hover:text-forest">
-                <span>{languageConfig.displayName}</span>
-                <ArrowRight className="h-4 w-4 text-stone-400" strokeWidth={1.5} />
-              </button>
-              );
-            })}
-          </div>
+          <Eyebrow>{t('onboarding.oneChoice')}</Eyebrow>
+          <h2 className="mt-4 font-display text-4xl leading-none">{t('onboarding.whichLanguage')}</h2>
+          <LanguagePreferenceButtons
+            className="mt-10"
+            label={t('onboarding.preferredLanguage')}
+            selected={selectedLanguage}
+            onSelect={(language) => {
+              void chooseLanguage(language, {
+                preserveProfile: profileState.completedFields.length > 0 || Boolean(profileState.name || profileState.story),
+              });
+            }}
+          />
         </div>
       </div>
     );
@@ -449,15 +506,18 @@ const VendorOnboarding: React.FC = () => {
   return (
     <div className="onboarding-page mx-auto max-w-6xl px-6 pb-28 pt-12 lg:px-10 lg:pt-20">
       <header className="workspace-header flex flex-col gap-8 border-b border-stone-300 pb-9 sm:flex-row sm:items-end sm:justify-between">
-        <div><Eyebrow>Artisan introduction</Eyebrow><h1 className="mt-4 font-display text-6xl leading-[0.9] tracking-[-0.05em] sm:text-8xl">Tell us your story.</h1></div>
-        <p className="max-w-xs text-sm leading-7 text-stone-600">Speak naturally. We will gather the details and leave the final word with you.</p>
+        <div><Eyebrow>{t('onboarding.voiceIntro')}</Eyebrow><h1 className="mt-4 font-display text-6xl leading-[0.9] tracking-[-0.05em] sm:text-8xl">{t('onboarding.tellStory')}</h1></div>
+        <p className="max-w-xs text-sm leading-7 text-stone-600">{t('onboarding.interfaceNote')}</p>
       </header>
 
       <div className="grid gap-14 py-12 lg:grid-cols-[1fr_0.9fr] lg:gap-20">
         <section>
           <div className="voice-panel border-y border-stone-300 py-8">
-            <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-stone-500">{statusCopy[status]}</p>
-            <h2 className="mt-5 max-w-xl font-display text-4xl leading-tight text-stone-950">{assistantMessage}</h2>
+            <div className="flex items-center justify-between gap-4">
+              <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-stone-500">{statusCopy[status]}</p>
+              <span className="text-[10px] uppercase tracking-[0.16em] text-stone-400">{LANGUAGE_CONFIG[selectedLanguage].displayName}</span>
+            </div>
+            <h2 className="mt-5 max-w-xl whitespace-pre-line font-display text-3xl leading-tight text-stone-950 sm:text-4xl">{assistantMessage}</h2>
             <div className="mt-6">
               <LocalVoiceStatusNotice />
             </div>
@@ -465,41 +525,52 @@ const VendorOnboarding: React.FC = () => {
               <div className={`flex h-28 w-28 items-center justify-center border border-stone-950 ${status === 'listening' ? 'bg-forest text-white' : 'bg-stone-950 text-white'}`}>
                 {status === 'processing' ? <Loader2 className="h-8 w-8 animate-spin" strokeWidth={1.25} /> : status === 'listening' ? <Square className="h-7 w-7" strokeWidth={1.25} /> : <Mic className="h-8 w-8" strokeWidth={1.25} />}
               </div>
-              <p className="mt-5 text-sm text-stone-600">{status === 'listening' ? 'Tap stop when you are finished.' : status === 'processing' ? 'Your words are being shaped into profile notes.' : 'Tap to speak'}</p>
-              {status !== 'processing' && <button type="button" onClick={() => status === 'listening' ? stopListeningAndSubmit() : void startListening()} className="mt-4 text-[10px] font-semibold uppercase tracking-[0.16em] text-stone-950 underline decoration-stone-300 underline-offset-4">{status === 'listening' ? 'Stop listening' : 'Begin speaking'}</button>}
+              <p className="mt-5 text-sm text-stone-600">{status === 'listening' ? t('onboarding.tapStop') : status === 'processing' ? t('onboarding.processingWords') : t('onboarding.tapSpeak')}</p>
+              {status !== 'processing' && <button type="button" onClick={() => status === 'listening' ? stopListeningAndSubmit() : void startListening()} className="mt-4 text-[10px] font-semibold uppercase tracking-[0.16em] text-stone-950 underline decoration-stone-300 underline-offset-4">{status === 'listening' ? t('onboarding.tapStop') : t('onboarding.tapSpeak')}</button>}
             </div>
-            {(lastTranscript || interimTranscript) && <div className="border-b border-stone-300 py-5 text-sm leading-7 text-stone-700"><span className="mr-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-stone-500">You said</span>{lastTranscript} <span className="text-stone-400">{interimTranscript}</span></div>}
+            {(lastTranscript || interimTranscript) && <div className="border-b border-stone-300 py-5 text-sm leading-7 text-stone-700"><span className="mr-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-stone-500">{t('onboarding.youSaid')}</span>{lastTranscript} <span className="text-stone-400">{interimTranscript}</span></div>}
             {error && <p className="mt-6 border-l-2 border-amber-700 pl-4 text-sm leading-6 text-stone-700">{error}</p>}
             <div className="mt-7 flex flex-wrap gap-6">
-              <button type="button" onClick={() => setShowManual((show) => !show)} className="text-[10px] font-semibold uppercase tracking-[0.16em] text-stone-600 underline decoration-stone-300 underline-offset-4">Type instead</button>
-              <button type="button" onClick={() => setStatus('language_selection')} className="text-[10px] font-semibold uppercase tracking-[0.16em] text-stone-600 underline decoration-stone-300 underline-offset-4">Change language</button>
+              <button type="button" onClick={() => setShowManual((show) => !show)} className="text-[10px] font-semibold uppercase tracking-[0.16em] text-stone-600 underline decoration-stone-300 underline-offset-4">{t('onboarding.typeInstead')}</button>
+              <button type="button" onClick={() => setStatus('language_selection')} className="text-[10px] font-semibold uppercase tracking-[0.16em] text-stone-600 underline decoration-stone-300 underline-offset-4">{t('onboarding.changeLanguage')}</button>
             </div>
-            {showManual && <div className="mt-7 flex border-b border-stone-300 pb-2"><input value={manualResponse} onChange={(event) => setManualResponse(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') submitManual(); }} placeholder="Write your answer" className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-stone-400" /><button type="button" onClick={submitManual} className="text-xs font-semibold uppercase tracking-[0.14em] text-stone-950">Send</button></div>}
+            {showManual && <div className="mt-7 flex border-b border-stone-300 pb-2"><input value={manualResponse} onChange={(event) => setManualResponse(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') submitManual(); }} placeholder="Write your answer" className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-stone-400" /><button type="button" onClick={submitManual} className="text-xs font-semibold uppercase tracking-[0.14em] text-stone-950">{t('onboarding.continue')}</button></div>}
           </div>
         </section>
 
         <aside className="lg:pt-8">
           <div className="border-t border-stone-300 pt-7">
-            <div className="flex items-start justify-between gap-4"><div><Eyebrow>Your profile</Eyebrow><h2 className="mt-3 font-display text-4xl">Taking shape.</h2></div><span className="text-[10px] uppercase tracking-[0.16em] text-stone-500">{profileState.completedFields.length}/5</span></div>
+            <div className="flex items-start justify-between gap-4"><div><Eyebrow>{t('onboarding.yourProfile')}</Eyebrow><h2 className="mt-3 font-display text-4xl">{t('onboarding.takingShape')}</h2></div><span className="text-[10px] uppercase tracking-[0.16em] text-stone-500">{profileState.completedFields.length}/{VENDOR_REQUIRED_FIELDS.length} {t('onboarding.captured')}</span></div>
             <div className="mt-8 border-y border-stone-300">
               {[
-                ['Name', profileState.name],
-                ['Location', profileState.location],
-                ['Craft', profileState.craft],
-                ['Experience', profileState.experienceYears ? `${profileState.experienceYears} years` : null],
-                ['Specialities', profileState.specialties.length ? profileState.specialties : profileState.skills],
-                ['Materials', profileState.materials],
-                ['Story', profileState.story],
-              ].map(([label, value]) => value ? <div key={label as string} className="border-b border-stone-200 py-4 last:border-0"><div className="flex items-center justify-between gap-4"><p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-stone-500">{label}</p><span className="text-[10px] text-forest">Captured · verify</span></div><p className="mt-2 text-sm leading-6 text-stone-950">{profileFieldValue(value)}</p></div> : null)}
-              {!profileState.completedFields.length && <p className="py-8 text-sm leading-7 text-stone-500">Your details will appear here as you speak.</p>}
+                [t('onboarding.field.name'), profileState.name],
+                [t('onboarding.field.location'), profileState.location],
+                [t('onboarding.field.craft'), profileState.craft],
+                [t('onboarding.field.experienceYears'), profileState.experienceYears ? `${profileState.experienceYears}` : null],
+                [t('onboarding.field.story'), profileState.story],
+              ].map(([label, value]) => value ? <div key={label as string} className="border-b border-stone-200 py-4 last:border-0"><div className="flex items-center justify-between gap-4"><p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-stone-500">{label}</p></div><p className="mt-2 text-sm leading-6 text-stone-950">{profileFieldValue(value)}</p></div> : null)}
+              {!profileState.completedFields.length && <p className="py-8 text-sm leading-7 text-stone-500">{t('onboarding.intro.oneShot')}</p>}
             </div>
           </div>
           {status === 'review' && (
             <div className="mt-10 border-t border-stone-300 pt-7">
-              <p className="text-sm leading-7 text-stone-600">Here’s what we’ve understood. Review every detail before sending it.</p>
-              {editing && <div className="mt-7 space-y-7"><Field label="Name" value={profileFieldValue(profileState.name)} onChange={(event) => updateField('name', event.target.value)} /><Field label="Location" value={profileFieldValue(profileState.location)} onChange={(event) => updateField('location', event.target.value)} /><Field label="Craft" value={profileFieldValue(profileState.craft)} onChange={(event) => updateField('craft', event.target.value)} /><Field label="Years of experience" value={profileFieldValue(profileState.experienceYears)} onChange={(event) => updateField('experienceYears', event.target.value)} type="number" /><Field label="Story" value={profileFieldValue(profileState.story)} onChange={(event) => updateField('story', event.target.value)} textarea /></div>}
-              <div className="mt-7 flex flex-wrap gap-6"><Button variant="light" onClick={() => setEditing((value) => !value)}><Edit3 className="h-4 w-4" strokeWidth={1.5} /> {editing ? 'Done editing' : 'Edit'}</Button><Button disabled={submitting || editing || profileState.missingRequiredFields.length > 0} onClick={() => void approveAndSubmit()}>{submitting ? 'Submitting' : 'Approve & submit'} <Check className="h-4 w-4" strokeWidth={1.5} /></Button></div>
-              <button type="button" onClick={() => { turnMachineRef.current.set('WAITING_FOR_USER'); setStatus('asking_followup'); void startListening(); }} className="mt-6 inline-flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-stone-500 hover:text-stone-950">Continue speaking <Mic className="h-4 w-4" strokeWidth={1.5} /></button>
+              <LanguagePreferenceButtons
+                label={t('onboarding.preferredLanguage')}
+                selected={selectedLanguage}
+                onSelect={(language) => { void chooseLanguage(language, { preserveProfile: true }); }}
+              />
+              {user && (
+                <div className="mt-8">
+                  <ProfilePhotoUpload
+                    ownerKey={user.id}
+                    value={profileImageUrl}
+                    onChange={setProfileImageUrl}
+                  />
+                </div>
+              )}
+              {editing && <div className="mt-7 space-y-7"><Field label={t('onboarding.field.name')} value={profileFieldValue(profileState.name)} onChange={(event) => updateField('name', event.target.value)} /><Field label={t('onboarding.field.location')} value={profileFieldValue(profileState.location)} onChange={(event) => updateField('location', event.target.value)} /><Field label={t('onboarding.field.craft')} value={profileFieldValue(profileState.craft)} onChange={(event) => updateField('craft', event.target.value)} /><Field label={t('onboarding.field.experienceYears')} value={profileFieldValue(profileState.experienceYears)} onChange={(event) => updateField('experienceYears', event.target.value)} type="number" /><Field label={t('onboarding.field.story')} value={profileFieldValue(profileState.story)} onChange={(event) => updateField('story', event.target.value)} textarea /></div>}
+              <div className="mt-7 flex flex-wrap gap-6"><Button variant="light" onClick={() => setEditing((value) => !value)}><Edit3 className="h-4 w-4" strokeWidth={1.5} /> {editing ? t('onboarding.doneEditing') : t('onboarding.edit')}</Button><Button disabled={submitting || editing || profileState.missingRequiredFields.length > 0} onClick={() => void approveAndSubmit()}>{submitting ? t('onboarding.submitting') : t('onboarding.approve')} <Check className="h-4 w-4" strokeWidth={1.5} /></Button></div>
+              <button type="button" onClick={() => { turnMachineRef.current.set('WAITING_FOR_USER'); setStatus('asking_followup'); void startListening(); }} className="mt-6 inline-flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-stone-500 hover:text-stone-950">{t('onboarding.continue')} <Mic className="h-4 w-4" strokeWidth={1.5} /></button>
             </div>
           )}
         </aside>

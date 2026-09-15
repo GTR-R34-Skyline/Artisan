@@ -1,5 +1,9 @@
 import { ArtisanProfileState } from './profileSchema.ts';
 import { SupportedLanguageCode } from '../../_shared/languageConfig.ts';
+import {
+  LANGUAGE_DISPLAY_NAME,
+  buildLanguageSystemInstruction,
+} from './sellerLanguage.ts';
 
 export interface ProfileReasoningResult {
   updates: Partial<ArtisanProfileState>;
@@ -75,44 +79,64 @@ const isProfileReasoningResult = (value: unknown): value is RawProfileReasoningR
     && typeof value.next_question === 'string';
 };
 
-const languageName = (language: SupportedLanguageCode): string => ({
-  en: 'English',
-  hi: 'Hindi',
-  ta: 'Tamil',
-  te: 'Telugu',
-  bn: 'Bengali',
-  kn: 'Kannada',
-}[language]);
-
 const buildPrompt = (
   currentProfile: ArtisanProfileState,
   transcript: string,
   selectedLanguage: SupportedLanguageCode,
-): string => `You are the semantic profile interviewer for an independent artisan marketplace.
-The artisan speaks in ${languageName(selectedLanguage)}. Return JSON only. Write next_question in ${languageName(selectedLanguage)}.
+): string => {
+  const languageName = LANGUAGE_DISPLAY_NAME[selectedLanguage];
+  return `You are the semantic profile interviewer for an independent artisan marketplace.
 
-Your job is incremental extraction. The current profile is authoritative. Inspect the new transcript in context and return only facts sufficiently supported by this new transcript in updates. Use null for scalar fields with no new evidence and [] for arrays with no new evidence. Never repeat existing profile values in updates just because they are present in the current profile.
+LANGUAGE (authoritative — do not ignore):
+${buildLanguageSystemInstruction(selectedLanguage)}
+
+selected_language_code=${selectedLanguage}
+selected_language_name=${languageName}
+
+Return JSON only. The next_question field MUST be written in ${languageName} using the appropriate native script when the selected language is not English.
+
+Your job is one-shot incremental extraction. The current profile is authoritative. Inspect the ENTIRE new transcript and extract EVERY supported field that is sufficiently evidenced in this transcript into updates. Use null for scalar fields with no new evidence and [] for arrays with no new evidence. Never repeat existing profile values in updates just because they are present in the current profile. Preserve already-collected values — do not clear them.
+
+Understanding rules:
+- Accept native script, Latin/romanized transliteration, and mixed phrasing for ${languageName}.
+- Example (Tamil selected): "yennodiya peyar Shashank" and "என்னுடைய பெயர் ஷஷாங்க்" both mean the seller's name is Shashank.
+- Example (Hindi selected): "mera naam Shashank hai", "mera naam Shashank h", "Mayan Anam Sashankha", and "मेरा नाम शशांक है" all mean the seller's name is Shashank.
+- Treat noisy STT transliteration charitably when the selected language is ${languageName}: map clear "my name is …" patterns to the name field.
+- When you understood a name, acknowledge it in ${languageName} native script (e.g. Hindi: "आपका नाम शशांक है।") then ask for remaining missing fields in the same language.
+- Extract the meaning into structured fields (name=Shashank) while still writing next_question in ${languageName} native script.
 
 Field semantics:
 - name: the artisan's actual personal or professional name. Never infer it from a sentence beginning with "I am" unless the grammar and context clearly identify a name.
-- location: where the artisan lives, works, or operates. "I am based out of Chennai" is location, never name.
-- craft: the craft practice the artisan performs.
+- location: where the artisan lives, works, or operates. Prefer an explicit "Location" label value when present (e.g. "Kanchipuram, Tamil Nadu"). NEVER take location from story text such as "a family of traditional weavers in Kanchipuram".
+- craft: the craft practice the artisan performs. Prefer an explicit "Craft" label value. Do not invent product listing details.
 - category: a supported craft category only when the transcript supports it.
-- experienceYears: years of experience only when explicitly stated or reasonably derived.
-- story: personal background or practice story explicitly provided in this turn.
+- experienceYears: numeric years only (e.g. "18 years" → 18). Prefer an explicit "Years of experience" label.
+- story: when an explicit "Your story" / "Story" label is present, capture EVERYTHING after that label including multiple sentences. Do not truncate. Never copy story text into location, craft, or name.
 - materials: materials explicitly mentioned in this turn.
 - products: products explicitly mentioned in this turn.
 - productionMethods: techniques or methods explicitly mentioned in this turn.
-- phone and email: only when explicitly provided.
-- skills, specialties, and languagesSpoken: only when explicitly supported.
+- phone and email: only when explicitly provided (email address only; phone number only).
+- skills, specialties: only when explicitly supported.
+- languagesSpoken: always return []. Language preference is chosen via dedicated UI buttons, never inferred from the transcript.
 
-Existing fields must remain unchanged unless the artisan clearly corrects or updates them (for example, "Actually, my name is Ramesh Kumar"). Do not fabricate, guess, normalize, or complete missing facts. Do not use a location phrase as a name. Do not ask for a field already known from the current profile. Ask one concise next question only for genuinely missing required information. If the transcript provides no useful fact, return no updates.
+When the transcript uses labeled lines such as Name / Email / Phone / Location / Craft / Years of experience / Your story, extract each labeled value exactly. If all required seller fields are present in one transcript, set continue_conversation to false and confirm the profile is ready to review in ${languageName} — do not ask follow-up questions for fields already provided.
+
+Existing fields must remain unchanged unless the artisan clearly corrects or updates them. Do not fabricate, guess, normalize, or complete missing facts. Do not use a location phrase as a name. Do not ask for a field already known from the current profile.
+
+For next_question:
+- Write ONLY in ${languageName} (native script when not English). This text is spoken by TTS in ${languageName}.
+- If you understood a value (e.g. name), you may briefly acknowledge it in ${languageName}, then ask for remaining missing required fields in one concise message.
+- If required seller profile information is still missing after merging this transcript, ask ONLY for the genuinely missing required fields in one concise message in ${languageName}. You may list multiple missing items together. Do NOT ask one field at a time when several are missing. Do NOT restart onboarding. Do NOT ask for product listing details.
+- If nothing useful was provided, briefly restate only what is still missing in ${languageName}.
+- If everything required is present, set continue_conversation to false and use a short confirmation in ${languageName} that the profile is ready to review.
+- NEVER produce English next_question when selected_language_code is not en.
 
 CURRENT PROFILE:
 ${JSON.stringify(currentProfile)}
 
 NEW TRANSCRIPT:
 ${JSON.stringify(transcript)}`;
+};
 
 const parseReasoningPayload = (text: string): ProfileReasoningResult => {
   let parsed: unknown;

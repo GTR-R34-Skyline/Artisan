@@ -1,5 +1,6 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { isDeliverableEmail, sendSellerOrderEmail } from '../_shared/sellerEmail.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -61,6 +62,134 @@ const productPrice = (row: Record<string, unknown>): number => {
 
 const uniqueStrings = (values: Array<string | null | undefined>): string[] =>
   Array.from(new Set(values.filter((value): value is string => Boolean(value && value.trim()))));
+
+/**
+ * Reads optional GST discount rate from Edge secrets.
+ * Do NOT invent a default rate — if unset/invalid, no GST discount is applied.
+ */
+const readConfiguredGstDiscountRate = (): number | null => {
+  const raw = Deno.env.get('GST_DISCOUNT_RATE') || Deno.env.get('GST_RATE');
+  if (!raw || !raw.trim()) return null;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0 || parsed >= 100) return null;
+  return parsed;
+};
+
+const notifySellersForPaidOrder = async (
+  admin: ReturnType<typeof createClient>,
+  orderId: string,
+): Promise<void> => {
+  const { data: order, error: orderError } = await admin
+    .from('orders')
+    .select('id, status, created_at, total_amount')
+    .eq('id', orderId)
+    .maybeSingle();
+  if (orderError) throw orderError;
+  if (!order) return;
+
+  const orderRecord = asRecord(order);
+  const orderStatus = toStringValue(orderRecord.status) || 'processing';
+  const orderDate = toStringValue(orderRecord.created_at) || new Date().toISOString();
+
+  const { data: itemRows, error: itemsError } = await admin
+    .from('order_items')
+    .select('id, product_id, vendor_id, quantity, unit_price, subtotal')
+    .eq('order_id', orderId);
+  if (itemsError) throw itemsError;
+
+  const items = (itemRows || []).map(asRecord);
+  const vendorIds = uniqueStrings(items.map((row) => toStringValue(row.vendor_id)));
+  if (!vendorIds.length) return;
+
+  const productIds = uniqueStrings(items.map((row) => toStringValue(row.product_id)));
+  const productsById = new Map<string, Record<string, unknown>>();
+  if (productIds.length) {
+    const { data: productRows, error: productsError } = await admin
+      .from('products')
+      .select('id, title, title_en')
+      .in('id', productIds);
+    if (productsError) throw productsError;
+    (productRows || []).forEach((row) => {
+      const record = asRecord(row);
+      const id = toStringValue(record.id);
+      if (id) productsById.set(id, record);
+    });
+  }
+
+  const appBase = (Deno.env.get('APP_BASE_URL') || Deno.env.get('PUBLIC_APP_URL') || '').replace(/\/$/, '');
+  const dashboardUrl = appBase ? `${appBase}/vendor/dashboard` : undefined;
+
+  for (const vendorId of vendorIds) {
+    const vendorItems = items.filter((row) => toStringValue(row.vendor_id) === vendorId);
+    if (!vendorItems.length) continue;
+
+    let sellerEmail: string | null = null;
+    let sellerName = 'Artisan';
+
+    try {
+      const { data: userData, error: userError } = await admin.auth.admin.getUserById(vendorId);
+      if (!userError && userData?.user?.email) {
+        sellerEmail = userData.user.email;
+      }
+    } catch (authError) {
+      console.warn('[seller-email] auth_lookup_failed', {
+        vendorId,
+        message: authError instanceof Error ? authError.message : String(authError),
+      });
+    }
+
+    const { data: profile } = await admin
+      .from('profiles')
+      .select('full_name')
+      .eq('id', vendorId)
+      .maybeSingle();
+    const profileName = toStringValue(asRecord(profile).full_name);
+    if (profileName) sellerName = profileName;
+
+    if (!isDeliverableEmail(sellerEmail)) {
+      const { data: appsByName } = await admin
+        .from('vendor_applications')
+        .select('email, name, created_at')
+        .ilike('name', sellerName)
+        .order('created_at', { ascending: false })
+        .limit(5);
+      const candidate = (appsByName || [])
+        .map(asRecord)
+        .map((row) => toStringValue(row.email))
+        .find((email) => isDeliverableEmail(email));
+      if (candidate) sellerEmail = candidate;
+    }
+
+    if (!isDeliverableEmail(sellerEmail)) {
+      console.warn('[seller-email] no_deliverable_email_for_vendor', { orderId, vendorId });
+      continue;
+    }
+
+    const lines = vendorItems.map((row) => {
+      const productId = toStringValue(row.product_id) || '';
+      const product = productsById.get(productId);
+      const productName =
+        toStringValue(product?.title_en) ||
+        toStringValue(product?.title) ||
+        'Product';
+      const quantity = Math.max(1, toNumber(row.quantity));
+      const unitPrice = toNumber(row.unit_price);
+      const subtotal = toNumber(row.subtotal) || unitPrice * quantity;
+      return { productName, quantity, unitPrice, subtotal };
+    });
+
+    await sendSellerOrderEmail({
+      to: sellerEmail!,
+      sellerName,
+      orderId,
+      orderStatus,
+      orderDate,
+      lines,
+      dashboardUrl,
+      idempotencyKey: `artisan-seller-order-${orderId}-${vendorId}`,
+    });
+  }
+};
 
 const buildTrackingNumber = (orderId: string, sequence: number): string => {
   const orderPrefix = orderId.replace(/-/g, '').slice(0, 8).toUpperCase();
@@ -200,7 +329,7 @@ serve(async (req) => {
         .map((item) => asRecord(item))
         .map((item) => ({
           productId: toStringValue(item.productId) || toStringValue(item.product_id) || '',
-          quantity: Math.max(1, Math.min(99, Math.round(toNumber(item.quantity)))),
+          quantity: Math.max(1, Math.round(toNumber(item.quantity))),
         }))
         .filter((item) => item.productId);
 
@@ -281,8 +410,27 @@ serve(async (req) => {
           vendor_id: toStringValue(product.vendor_id),
           quantity: item.quantity,
           unit_price: unitPrice,
+          subtotal,
         });
       }
+
+      // GSTIN is accepted as free text (no external verification). Discount applies only when
+      // a GSTIN value is supplied AND GST_DISCOUNT_RATE / GST_RATE is configured server-side.
+      const gstin = toStringValue(body.gstin) || toStringValue(body.GSTIN);
+      const hasGstin = Boolean(gstin);
+      const gstRate = readConfiguredGstDiscountRate();
+      let gstDiscountAmount = 0;
+      let gstDiscountApplied = false;
+      if (hasGstin && gstRate !== null) {
+        gstDiscountAmount = Math.round((totalAmount * (gstRate / 100)) * 100) / 100;
+        totalAmount = Math.max(0, Math.round((totalAmount - gstDiscountAmount) * 100) / 100);
+        gstDiscountApplied = gstDiscountAmount > 0;
+      }
+
+      // Ignore any client-supplied totals / discounts — server values are authoritative.
+      void body.totalAmount;
+      void body.discountAmount;
+      void body.gstDiscountAmount;
 
       const { data: order, error: orderError } = await admin
         .from('orders')
@@ -338,7 +486,19 @@ serve(async (req) => {
 
       if (paymentError) throw paymentError;
 
-      return json({ success: true, order, payment });
+      return json({
+        success: true,
+        order,
+        payment,
+        pricing: {
+          gstinSupplied: hasGstin,
+          gstDiscountRate: gstRate,
+          gstDiscountAmount,
+          gstDiscountApplied,
+          // GSTIN is not persisted — no suitable schema field without a migration.
+          gstinPersisted: false,
+        },
+      });
     }
 
     if (action === 'get_checkout') {
@@ -417,9 +577,21 @@ serve(async (req) => {
         try {
           await ensureShipmentsForPaidOrder(admin, orderId);
         } catch (shipmentError) {
-          return json({
-            error: readError(shipmentError) || 'Payment succeeded, but shipment preparation failed.',
-          }, 500);
+          console.error('[marketplace-checkout] shipment_prep_failed', {
+            orderId,
+            message: readError(shipmentError),
+          });
+          // Payment already succeeded — do not roll back the order for shipment side effects.
+        }
+
+        // Seller email is a best-effort side effect. Failures must never fail the order.
+        try {
+          await notifySellersForPaidOrder(admin, orderId);
+        } catch (notifyError) {
+          console.error('[marketplace-checkout] seller_notify_failed', {
+            orderId,
+            message: readError(notifyError),
+          });
         }
       }
 

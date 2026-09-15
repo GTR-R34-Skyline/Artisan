@@ -24,6 +24,10 @@ Provider credentials must never use a `VITE_` prefix. Keep them in Supabase Edge
 - `DEEPGRAM_MODEL` (optional)
 - `CARTESIA_MODEL` (optional)
 - `GEMINI_REASONING_MODEL` (optional, defaults to `gemini-3.6-flash`)
+- `GST_DISCOUNT_RATE` (optional percent for bulk/business GSTIN discount; e.g. `18`. If unset, no GST discount is applied)
+- `RESEND_API_KEY` (optional; required to send seller purchase emails)
+- `EMAIL_FROM` or `SELLER_NOTIFY_FROM` (optional From address for seller emails)
+- `APP_BASE_URL` (optional public site URL used in seller dashboard email links)
 
 ## Supabase
 

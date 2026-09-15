@@ -112,6 +112,7 @@ export const createCheckoutOrder = async (input: {
   items: CartItem[];
   shippingAddress: string;
   idempotencyKey: string;
+  gstin?: string;
 }): Promise<{ order: CheckoutOrder; payment: CheckoutPayment | null; idempotent: boolean }> => {
   const { data, error } = await supabase.functions.invoke('marketplace-checkout', {
     body: {
@@ -119,6 +120,7 @@ export const createCheckoutOrder = async (input: {
       items: input.items.map((item) => ({ productId: item.productId, quantity: item.quantity })),
       shippingAddress: input.shippingAddress,
       idempotencyKey: input.idempotencyKey,
+      gstin: input.gstin?.trim() || undefined,
     },
   });
 

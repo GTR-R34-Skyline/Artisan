@@ -9,6 +9,11 @@ import {
 } from './_shared/profileSchema.ts';
 import { reasonAboutProfile, streamReasonAboutProfileTokens } from './_shared/geminiClient.ts';
 import { encodeSse, runStreamingProfileTurn } from './_shared/streamingPipeline.ts';
+import { extractSellerProfileFields } from './_shared/profileFieldExtraction.ts';
+import {
+  localizedMissingFieldsQuestion,
+  localizedReadyToReview,
+} from './_shared/sellerLanguage.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -61,20 +66,72 @@ const emptyTranscriptResponse = (state: ArtisanProfileState, provider: string) =
 });
 
 const buildAssistantMessage = (nextState: ArtisanProfileState, nextQuestion: string): string =>
-  nextState.conversationComplete ? 'Thank you. Your profile is ready to review.' : nextQuestion.trim();
+  nextQuestion.trim();
+
+const looksLikeEnglishOnly = (text: string, language: SupportedLanguageCode): boolean => {
+  if (language === 'en') return false;
+  const trimmed = text.trim();
+  if (!trimmed) return true;
+  // Native Indic scripts occupy these Unicode blocks; Latin-only replies are wrong for non-English.
+  const hasIndic = /[\u0900-\u097F\u0980-\u09FF\u0B80-\u0BFF\u0C00-\u0C7F\u0C80-\u0CFF]/.test(trimmed);
+  const hasLatinWords = /[A-Za-z]{3,}/.test(trimmed);
+  return !hasIndic && hasLatinWords;
+};
 
 const applyReasoning = (
   currentState: ArtisanProfileState,
   reasoning: Awaited<ReturnType<typeof reasonAboutProfile>>,
   isPublicApplication: boolean,
+  transcript = '',
+  selectedLanguage: SupportedLanguageCode = 'en',
 ) => {
-  const updates = { ...reasoning.updates };
-  if (typeof updates.story === 'string' && currentState.story) {
+  // Deterministic extraction wins for explicitly provided seller fields (labels / clear patterns).
+  // Gemini may still fill gaps and produce next_question, but must not overwrite solid labeled values.
+  const deterministic = extractSellerProfileFields(transcript);
+  const updates: Partial<ArtisanProfileState> = { ...reasoning.updates };
+
+  (['name', 'email', 'phone', 'location', 'craft', 'experienceYears', 'story'] as const).forEach((field) => {
+    const value = deterministic[field];
+    if (value !== undefined && value !== null && value !== '') {
+      updates[field] = value as never;
+    }
+  });
+
+  if (typeof updates.story === 'string' && currentState.story && !deterministic.story) {
     updates.story = `${currentState.story}\n${updates.story}`;
   }
+
   const nextState = mergeProfileState(currentState, updates, {}, isPublicApplication);
-  const assistantMessage = buildAssistantMessage(nextState, reasoning.nextQuestion);
-  return { nextState, assistantMessage, reasoning };
+
+  let nextQuestion = reasoning.nextQuestion?.trim() || '';
+  if (nextState.conversationComplete) {
+    // Prefer model confirmation if already in the selected language; otherwise use localized template.
+    nextQuestion = looksLikeEnglishOnly(nextQuestion, selectedLanguage)
+      ? localizedReadyToReview(selectedLanguage)
+      : (nextQuestion || localizedReadyToReview(selectedLanguage));
+  } else if (!nextQuestion || looksLikeEnglishOnly(nextQuestion, selectedLanguage)) {
+    // Never let an English hardcoded fallback become the TTS text for a non-English seller.
+    nextQuestion = localizedMissingFieldsQuestion(nextState.missingRequiredFields, selectedLanguage);
+  }
+
+  console.info('[profile-voice] language_turn', {
+    selectedLanguage,
+    deterministicFields: Object.keys(deterministic),
+    missingRequiredFields: nextState.missingRequiredFields,
+    nextQuestionChars: nextQuestion.length,
+    nextQuestionScriptHint: looksLikeEnglishOnly(nextQuestion, selectedLanguage) ? 'latin' : 'localized_or_en',
+  });
+
+  const assistantMessage = buildAssistantMessage(nextState, nextQuestion);
+  return {
+    nextState,
+    assistantMessage,
+    reasoning: {
+      ...reasoning,
+      nextQuestion,
+      continueConversation: !nextState.conversationComplete,
+    },
+  };
 };
 
 serve(async (req) => {
@@ -227,9 +284,9 @@ serve(async (req) => {
                 }
                 return streamReasonAboutProfileTokens(currentState, transcript, selectedLanguage, geminiTurn);
               },
-              resolveAssistantMessage: (reasoning) => applyReasoning(currentState, reasoning, isPublicApplication).assistantMessage,
+              resolveAssistantMessage: (reasoning) => applyReasoning(currentState, reasoning, isPublicApplication, transcript, selectedLanguage).assistantMessage,
               buildCompletePayload: (reasoning, assistantMessage) => {
-                const { nextState } = applyReasoning(currentState, reasoning, isPublicApplication);
+                const { nextState } = applyReasoning(currentState, reasoning, isPublicApplication, transcript, selectedLanguage);
                 return buildCompletePayload(reasoning, assistantMessage, nextState);
               },
             })) {
@@ -294,7 +351,7 @@ serve(async (req) => {
       });
     }
 
-    const { nextState, assistantMessage } = applyReasoning(currentState, reasoning, isPublicApplication);
+    const { nextState, assistantMessage } = applyReasoning(currentState, reasoning, isPublicApplication, transcript, selectedLanguage);
     if (!assistantMessage) {
       return jsonResponse(buildCompletePayload(reasoning, '', nextState, 'Your words were saved. Continue speaking when you are ready.'));
     }

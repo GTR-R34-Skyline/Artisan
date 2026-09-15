@@ -1,9 +1,31 @@
-const SENTENCE_BOUNDARY = /([.!?؟。！？])\s+/u;
+/**
+ * Incremental speakable-chunk emitter for LLM → TTS.
+ * Supports ASCII and Indic sentence punctuation (। ॥ ? ! etc.).
+ */
 
-/** Accumulates streamed assistant text and yields natural TTS-sized chunks. */
+const isAsciiSentenceEnd = (char: string): boolean =>
+  char === '.' || char === '!' || char === '?';
+
+/** Devanagari danda (।) / double danda (॥) — hard sentence terminators in Hindi/Bengali. */
+const isIndicDanda = (char: string): boolean => {
+  const code = char.codePointAt(0);
+  return code === 0x0964 || code === 0x0965;
+};
+
+const isOtherSentenceEnd = (char: string): boolean => {
+  const code = char.codePointAt(0);
+  return code === 0x061F // Arabic ؟
+    || code === 0x3002 // Ideographic 。
+    || code === 0xFF01 // Fullwidth ！
+    || code === 0xFF1F; // Fullwidth ？
+};
+
+const isSentenceEnd = (char: string): boolean =>
+  isAsciiSentenceEnd(char) || isIndicDanda(char) || isOtherSentenceEnd(char);
+
 export class TextChunkEmitter {
   private pending = '';
-  private emittedLength = 0;
+  private spokenThrough = 0;
 
   push(delta: string): string[] {
     if (!delta) return [];
@@ -15,42 +37,89 @@ export class TextChunkEmitter {
     return this.drain(true);
   }
 
+  /** Characters already removed/queued for TTS. */
+  get spokenLength(): number {
+    return this.spokenThrough;
+  }
+
+  /** Full buffered text so far (including already spoken prefix). */
+  get buffer(): string {
+    return this.pending;
+  }
+
   private drain(force: boolean): string[] {
     const chunks: string[] = [];
-    const speakable = this.pending.slice(this.emittedLength);
-    if (!speakable.trim()) return chunks;
+    let rest = this.pending.slice(this.spokenThrough);
+    if (!rest.trim()) return chunks;
 
-    let rest = speakable;
     while (rest.length > 0) {
-      const match = rest.match(SENTENCE_BOUNDARY);
-      if (match && match.index !== undefined) {
-        const end = match.index + match[1].length;
-        const sentence = rest.slice(0, end + 1).trim();
-        if (sentence.length >= 8) {
+      const boundary = this.findBoundary(rest);
+      if (boundary) {
+        const raw = rest.slice(0, boundary.consume);
+        const sentence = raw.trim();
+        // Allow short acknowledgements ("धन्यवाद।") — only skip tiny noise.
+        if (sentence.length >= 2) {
           chunks.push(sentence);
-          this.emittedLength += end + 1;
-          rest = rest.slice(end + 1);
+          this.spokenThrough += boundary.consume;
+          rest = this.pending.slice(this.spokenThrough);
           continue;
         }
       }
 
-      if (force && rest.trim().length >= 4) {
-        chunks.push(rest.trim());
-        this.emittedLength += rest.length;
+      if (force) {
+        const trailing = rest.trim();
+        if (trailing.length >= 1) {
+          chunks.push(trailing);
+          this.spokenThrough = this.pending.length;
+        }
+        break;
+      }
+
+      // Long phrase fallback: split at whitespace before TTS gets a giant blob.
+      if (rest.length >= 140) {
+        const splitAt = this.findPhraseSplit(rest, 110);
+        if (splitAt > 24) {
+          const chunk = rest.slice(0, splitAt).trim();
+          if (chunk) {
+            chunks.push(chunk);
+            this.spokenThrough += splitAt;
+            rest = this.pending.slice(this.spokenThrough);
+            continue;
+          }
+        }
       }
       break;
     }
 
-    if (!force && rest.length >= 120) {
-      const splitAt = rest.lastIndexOf(' ', 100);
-      if (splitAt > 20) {
-        const chunk = rest.slice(0, splitAt).trim();
-        chunks.push(chunk);
-        this.emittedLength += splitAt + 1;
+    return chunks;
+  }
+
+  private findBoundary(text: string): { consume: number } | null {
+    for (let index = 0; index < text.length; index += 1) {
+      const char = text[index];
+      if (!isSentenceEnd(char)) continue;
+
+      const next = text[index + 1];
+      // Hindi/Bengali danda is a hard terminator even when the next grapheme is a letter
+      // (models often emit "धन्यवाद।कृपया" with no space). ASCII .!? still need whitespace/EOS
+      // so abbreviations/decimals are not split.
+      if (isIndicDanda(char) || next === undefined || /\s/u.test(next)) {
+        let consume = index + 1;
+        while (consume < text.length && /\s/u.test(text[consume])) consume += 1;
+        return { consume };
       }
     }
+    return null;
+  }
 
-    return chunks;
+  private findPhraseSplit(text: string, preferred: number): number {
+    const window = text.slice(0, preferred);
+    // Prefer splitting after Indic/ASCII comma or whitespace.
+    const comma = Math.max(window.lastIndexOf('،'), window.lastIndexOf(','));
+    if (comma > 24) return comma + 1;
+    const space = window.search(/\s\S*$/u);
+    if (space > 24) return space + 1;
+    return window.lastIndexOf(' ');
   }
 }
 
@@ -91,25 +160,38 @@ export class NextQuestionStreamParser {
     return { delta: newText, complete: false, full: partial };
   }
 
+  private decodeEscape(buffer: string, index: number): { char: string; advance: number } | null {
+    if (buffer[index] !== '\\' || index + 1 >= buffer.length) return null;
+    const next = buffer[index + 1];
+    if (next === 'n') return { char: '\n', advance: 2 };
+    if (next === '"') return { char: '"', advance: 2 };
+    if (next === '\\') return { char: '\\', advance: 2 };
+    if (next === '/') return { char: '/', advance: 2 };
+    if (next === 't') return { char: '\t', advance: 2 };
+    if (next === 'u' && index + 5 < buffer.length) {
+      const hex = buffer.slice(index + 2, index + 6);
+      if (/^[0-9a-fA-F]{4}$/.test(hex)) {
+        return { char: String.fromCharCode(parseInt(hex, 16)), advance: 6 };
+      }
+    }
+    return { char: next, advance: 2 };
+  }
+
   private extractPartial(): string {
     if (this.valueStart < 0) return '';
     let result = '';
     for (let index = this.valueStart; index < this.buffer.length; index += 1) {
-      const char = this.buffer[index];
-      if (char === '\\' && index + 1 < this.buffer.length) {
-        const next = this.buffer[index + 1];
-        if (next === 'n') result += '\n';
-        else if (next === '"') result += '"';
-        else if (next === '\\') result += '\\';
-        else result += next;
-        index += 1;
+      const decoded = this.decodeEscape(this.buffer, index);
+      if (decoded) {
+        result += decoded.char;
+        index += decoded.advance - 1;
         continue;
       }
-      if (char === '"') {
+      if (this.buffer[index] === '"') {
         this.closed = true;
         break;
       }
-      result += char;
+      result += this.buffer[index];
     }
     return result;
   }
@@ -118,18 +200,14 @@ export class NextQuestionStreamParser {
     if (this.valueStart < 0) return '';
     let result = '';
     for (let index = this.valueStart; index < this.buffer.length; index += 1) {
-      const char = this.buffer[index];
-      if (char === '\\' && index + 1 < this.buffer.length) {
-        const next = this.buffer[index + 1];
-        if (next === 'n') result += '\n';
-        else if (next === '"') result += '"';
-        else if (next === '\\') result += '\\';
-        else result += next;
-        index += 1;
+      const decoded = this.decodeEscape(this.buffer, index);
+      if (decoded) {
+        result += decoded.char;
+        index += decoded.advance - 1;
         continue;
       }
-      if (char === '"') break;
-      result += char;
+      if (this.buffer[index] === '"') break;
+      result += this.buffer[index];
     }
     return result;
   }

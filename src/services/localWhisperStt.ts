@@ -28,8 +28,9 @@ const concatFloat32 = (chunks: Float32Array[]): Float32Array => {
 };
 
 /**
- * Microphone capture that feeds PCM into the SIH_PIPELINE Whisper STT worker.
- * Public methods match DeepgramStreamingStt so the existing profile UI can swap providers.
+ * Microphone capture that feeds PCM into the local Whisper STT worker.
+ * NOTE: The bundled model is English-only (whisper-tiny.en). For Tamil/Hindi/etc.,
+ * createProfileVoiceStt routes to Deepgram with the selected language instead.
  */
 export class LocalWhisperStt {
   private stream: MediaStream | null = null;
@@ -60,6 +61,10 @@ export class LocalWhisperStt {
     if (!ready) throw new Error('Local speech recognition is still loading. Please try again in a moment.');
 
     logVoiceTiming('stt_recording_started', { provider: 'local-whisper', language: this.language });
+    if (this.language !== 'en') {
+      // Defensive: non-English should not reach this class; fall through with a clear error.
+      throw new Error(`Local Whisper only supports English. Selected language was "${this.language}".`);
+    }
 
     this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     resetVoicePerf();

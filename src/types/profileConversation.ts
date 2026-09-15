@@ -49,7 +49,10 @@ export interface ProfileConversationResponse {
   needsConfirmation?: string[];
 }
 
-export const createInitialProfileState = (selectedLanguage?: SupportedLanguageCode): ArtisanProfileState => ({
+export const createInitialProfileState = (
+  selectedLanguage?: SupportedLanguageCode,
+  publicApplication = false,
+): ArtisanProfileState => ({
   name: null,
   email: null,
   phone: null,
@@ -66,6 +69,8 @@ export const createInitialProfileState = (selectedLanguage?: SupportedLanguageCo
   languagesSpoken: selectedLanguage ? [selectedLanguage] : [],
   confidence: {},
   completedFields: [],
-  missingRequiredFields: ['name', 'location', 'craft', 'experienceYears', 'story'],
+  missingRequiredFields: publicApplication
+    ? ['name', 'email', 'phone', 'location', 'craft', 'experienceYears', 'story']
+    : ['name', 'location', 'craft', 'experienceYears', 'story'],
   conversationComplete: false,
 });

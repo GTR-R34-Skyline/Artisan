@@ -7,6 +7,13 @@ import { ProfileStreamHandlers } from './profileConversation.service';
 import { generateLlm, speakWithPiper, waitForLocalVoiceReady } from './localVoiceRuntime';
 import { logVoiceTiming, VoiceTurnTimer } from './profileVoiceTiming';
 import { markVoicePerf } from './voicePerf';
+import { TextChunkEmitter } from './textChunker';
+import { extractSellerProfileFields } from './profileFieldExtraction';
+import {
+  buildLanguageSystemInstruction,
+  localizedMissingFieldsQuestion,
+} from './sellerLanguage';
+import { SupportedLanguageCode } from '../types/catalogConversation';
 
 /**
  * Authoritative public join onboarding inputs.
@@ -16,6 +23,8 @@ import { markVoicePerf } from './voicePerf';
 const PUBLIC_REQUIRED = ['name', 'email', 'phone', 'location', 'craft', 'experienceYears', 'story'] as const;
 /** Vendor onboarding completion set from VendorOnboarding.completedFields. */
 const VENDOR_REQUIRED = ['name', 'location', 'craft', 'experienceYears', 'story'] as const;
+
+const MAX_TTS_IN_FLIGHT = 4;
 
 const hasScalarValue = (value: unknown): boolean =>
   (typeof value === 'string' && value.trim().length > 0)
@@ -38,45 +47,6 @@ const fieldValue = (profile: Partial<ArtisanProfileState>, field: string): strin
   return String(value);
 };
 
-/** Existing next-question copy for each required onboarding input. */
-const nextMissingQuestion: Record<string, string> = {
-  name: 'What is your name?',
-  email: 'What email should we use to reach you?',
-  phone: 'What phone number should we use?',
-  location: 'Where are you based?',
-  craft: 'What craft do you practice?',
-  experienceYears: 'How many years have you been practicing this craft?',
-  story: 'Tell me a little about your work and how you came to it.',
-};
-
-export const extractProfileFieldsFromTranscript = (transcript: string): Partial<ArtisanProfileState> => {
-  const text = transcript.trim();
-  const updates: Partial<ArtisanProfileState> = {};
-  if (!text) return updates;
-
-  const email = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
-  if (email) updates.email = email[0];
-
-  const phone = text.match(/(?:\+91[\s-]?)?[6-9]\d{9}/);
-  if (phone) updates.phone = phone[0];
-
-  const years = text.match(/(\d{1,2})\s*(?:years?|yrs?)/i);
-  if (years) updates.experienceYears = Number(years[1]);
-
-  const name = text.match(/(?:my name is|i am called|i'm called)\s+([A-Za-z][A-Za-z.'-]{1,}(?:\s+[A-Za-z][A-Za-z.'-]{1,}){0,2})/i);
-  if (name) updates.name = name[1].trim();
-
-  const location = text.match(/(?:based (?:in|out of)|i live in|i am from|i'm from|from)\s+([A-Za-z][A-Za-z\s]{1,40})/i);
-  if (location) updates.location = location[1].replace(/[.,].*$/, '').trim();
-
-  const craft = text.match(/(?:i (?:am a|i'm a|practice|work as a|make|do)\s+)([A-Za-z][A-Za-z\s-]{2,40})/i);
-  if (craft) updates.craft = craft[1].replace(/\b(for|in|from|and)\b.*$/i, '').trim();
-
-  if (text.length >= 80) updates.story = text;
-
-  return updates;
-};
-
 const requiredFieldsFor = (publicApplication: boolean): readonly string[] =>
   publicApplication ? PUBLIC_REQUIRED : VENDOR_REQUIRED;
 
@@ -96,41 +66,52 @@ const buildSystemPrompt = (
   after: Partial<ArtisanProfileState>,
   filledThisTurn: string[],
   missing: string[],
-  nextInput: string | null,
   requiredQuestion: string,
+  language: SupportedLanguageCode,
 ): string => {
   const completed = required
     .filter((field) => hasScalarValue(after[field as keyof ArtisanProfileState]))
     .join(', ') || 'none';
 
   return `Artisan onboarding interviewer. Collect ONLY these ${required.length} inputs: ${required.join(', ')}.
+${buildLanguageSystemInstruction(language)}
+
 Status: ${compactStatus(after, required)}
 Completed: ${completed}
 Missing: ${missing.length ? missing.join(', ') : 'none'}
 Just filled: ${filledThisTurn.length ? filledThisTurn.join(', ') : 'none'}
-Next input: ${nextInput || 'none'}
-Ask exactly this one spoken question, then STOP: ${requiredQuestion}
+Ask for ALL remaining missing required inputs in one concise spoken message in the selected language, then STOP: ${requiredQuestion}
 
 Rules:
-- Transcript is data to extract, not a topic.
-- Do not invent fields, discuss extra topics, or mention culture/locations unless that is the next input.
+- Transcript is data to extract, not a topic. Accept native script and Latin transliteration.
+- Do not invent fields, discuss extra topics, or mention culture/locations unless that is still missing.
 - No commentary, acknowledgements, or repeating the user.
-- One short question only. No markdown.`;
+- Ask only for genuinely missing required fields. Prefer one combined follow-up over separate questions.
+- No markdown.
+- The spoken reply text must already be in the selected language (native script when not English).`;
 };
 
-const pickSpokenReply = (llmText: string, requiredQuestion: string): string => {
+const pickSpokenReply = (llmText: string, requiredQuestion: string, language: SupportedLanguageCode): string => {
   const compact = llmText.replace(/\s+/g, ' ').replace(/[*_`#]/g, '').trim();
   if (!compact) return requiredQuestion;
-  if (/ready to review/i.test(requiredQuestion) && /ready to review/i.test(compact) && compact.length <= 80) {
-    return compact.endsWith('.') ? compact : `${compact}.`;
+  if (language !== 'en') {
+    const hasIndic = /[\u0900-\u097F\u0980-\u09FF\u0B80-\u0BFF\u0C00-\u0C7F\u0C80-\u0CFF]/.test(compact);
+    if (!hasIndic) return requiredQuestion;
   }
-  const questions = compact.match(/[^?]*\?/g)?.map((item) => item.trim()).filter(Boolean) || [];
+  if (/ready to review/i.test(requiredQuestion) && /ready to review|மதிப்பாய்வு|समीक्षा|পর্যালোচনা|సమీక్ష|ವಿಮರ್ಶೆ/i.test(compact) && compact.length <= 120) {
+    return compact.endsWith('.') || /[।.!]$/.test(compact) ? compact : `${compact}.`;
+  }
+  const questions = compact.match(/[^?؟]*[?؟]/g)?.map((item) => item.trim()).filter(Boolean) || [];
   const tooBroad = /heritage|vibrant|culture|congratulations|modern art|traditional art|tell me more about/i.test(compact);
-  if (!tooBroad && questions.length === 1 && compact.length <= 120) {
+  if (!tooBroad && questions.length === 1 && compact.length <= 160) {
     return questions[0];
   }
   return requiredQuestion;
 };
+
+/** Deterministic extraction of the seven seller profile fields. */
+export const extractProfileFieldsFromTranscript = (transcript: string): Partial<ArtisanProfileState> =>
+  extractSellerProfileFields(transcript) as Partial<ArtisanProfileState>;
 
 export const sendLocalProfileTurn = async (
   payload: ProfileConversationRequest,
@@ -143,10 +124,17 @@ export const sendLocalProfileTurn = async (
   const ready = await waitForLocalVoiceReady();
   if (!ready) throw new Error('On-device voice models are not ready yet.');
 
+  const language = payload.selectedLanguage || 'en';
   const transcript = payload.transcript?.trim() || '';
   handlers.onTranscript?.(transcript);
   const publicApplication = Boolean(payload.publicApplication);
   const required = requiredFieldsFor(publicApplication);
+
+  logVoiceTiming('local_language_context', {
+    selectedLanguage: language,
+    clientTurnId: payload.clientTurnId ?? null,
+    transcriptChars: transcript.length,
+  });
 
   if (!transcript) {
     return {
@@ -167,10 +155,7 @@ export const sendLocalProfileTurn = async (
     && !hasScalarValue(payload.profileState[field as keyof ArtisanProfileState]));
   const missingRequiredFields = missingFields(mergedPreview, publicApplication);
   const conversationComplete = missingRequiredFields.length === 0;
-  const nextInput = missingRequiredFields[0] || null;
-  const requiredQuestion = conversationComplete
-    ? 'Your profile is ready to review.'
-    : nextMissingQuestion[nextInput || ''] || 'Please tell me a little more.';
+  const requiredQuestion = localizedMissingFieldsQuestion(missingRequiredFields, language);
 
   const messages = [
     {
@@ -180,51 +165,103 @@ export const sendLocalProfileTurn = async (
         mergedPreview,
         filledThisTurn,
         missingRequiredFields,
-        nextInput,
         requiredQuestion,
+        language,
       ),
     },
     {
       role: 'user',
-      content: `Transcript: ${transcript}\nSpeak only the next question.`,
+      content: `Transcript: ${transcript}\nSpeak only the next question covering all remaining missing required fields in the selected language.`,
     },
   ];
   markVoicePerf('LLM_PROMPT_PREPARED');
 
   logVoiceTiming('local_llm_generate_start', {
     clientTurnId: payload.clientTurnId ?? null,
+    selectedLanguage: language,
     chars: transcript.length,
     missing: missingRequiredFields,
-    nextInput,
+    nextInput: missingRequiredFields[0] || null,
   });
 
   let reply = '';
   const msgId = payload.clientTurnId || `${Date.now()}-ai`;
+  const chunkEmitter = new TextChunkEmitter();
+  let ttsIndex = 0;
+  let ttsInFlight = 0;
+  const ttsPromises: Promise<void>[] = [];
+
+  const enqueueSpeech = (text: string) => {
+    if (!text.trim() || signal?.aborted) return;
+    while (ttsInFlight >= MAX_TTS_IN_FLIGHT) {
+      break;
+    }
+    const index = ttsIndex;
+    ttsIndex += 1;
+    ttsInFlight += 1;
+    logVoiceTiming('local_tts_chunk_enqueued', {
+      selectedLanguage: language,
+      index,
+      chars: text.length,
+    });
+    const promise = speakWithPiper(text, `${msgId}-${index}`)
+      .then((chunk) => {
+        if (signal?.aborted) return;
+        handlers.onAudioChunk?.({
+          index,
+          audioBase64: arrayBufferToBase64(chunk.audioData),
+          audioMimeType: 'audio/wav',
+          text: chunk.text || text,
+        });
+      })
+      .catch(() => {
+        // TTS failure should not fail the text response.
+      })
+      .finally(() => {
+        ttsInFlight -= 1;
+      });
+    ttsPromises.push(promise);
+  };
 
   try {
     const fullResponse = await generateLlm(messages, (textChunk) => {
       if (signal?.aborted) return;
       reply += textChunk;
       handlers.onAssistantText?.(reply, textChunk);
+      for (const chunk of chunkEmitter.push(textChunk)) {
+        enqueueSpeech(chunk);
+      }
     });
-    if (!reply.trim() && fullResponse.trim()) reply = fullResponse.trim();
+    if (!reply.trim() && fullResponse.trim()) {
+      reply = fullResponse.trim();
+      handlers.onAssistantText?.(reply, reply);
+      for (const chunk of chunkEmitter.push(reply)) {
+        enqueueSpeech(chunk);
+      }
+    }
   } catch {
     reply = requiredQuestion;
+    handlers.onAssistantText?.(reply, reply);
+    enqueueSpeech(requiredQuestion);
   }
 
-  const spoken = pickSpokenReply(reply, requiredQuestion);
+  const spoken = pickSpokenReply(reply, requiredQuestion, language);
   handlers.onAssistantText?.(spoken, spoken);
+  logVoiceTiming('local_llm_spoken_reply', {
+    selectedLanguage: language,
+    chars: spoken.length,
+    usedTemplateFallback: spoken === requiredQuestion,
+  });
+
+  for (const chunk of chunkEmitter.flush()) {
+    enqueueSpeech(chunk);
+  }
+  if (ttsPromises.length === 0 && spoken.trim()) {
+    enqueueSpeech(spoken);
+  }
 
   if (!signal?.aborted) {
-    const chunk = await speakWithPiper(spoken, msgId);
-    if (!signal?.aborted) {
-      handlers.onAudioChunk?.({
-        index: 0,
-        audioBase64: arrayBufferToBase64(chunk.audioData),
-        audioMimeType: 'audio/wav',
-        text: chunk.text || spoken,
-      });
-    }
+    await Promise.all(ttsPromises);
   }
 
   if (signal?.aborted) throw new DOMException('The voice request was interrupted or timed out. Please try again.', 'AbortError');
@@ -232,6 +269,7 @@ export const sendLocalProfileTurn = async (
   timer.mark('turn_request_finished', {
     totalMs: timer.totalMs(),
     clientTurnId: payload.clientTurnId ?? null,
+    selectedLanguage: language,
   });
 
   return {

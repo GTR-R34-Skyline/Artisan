@@ -89,3 +89,6 @@ export const getLanguageConfig = (code: string | null | undefined): LanguageConf
   }
   return LANGUAGE_CONFIG.en;
 };
+
+export const isSupportedLanguageCode = (code: string | null | undefined): code is SupportedLanguageCode =>
+  Boolean(code && code in LANGUAGE_CONFIG);
