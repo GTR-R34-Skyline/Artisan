@@ -5,6 +5,7 @@ import { useAuth } from '../auth/useAuthHook';
 import { useCart } from '../context/CartContext';
 import { useLocale } from '../i18n/LocaleContext';
 import LanguageSelector from './LanguageSelector';
+import PwaStatus from './pwa/PwaStatus';
 import { FloatingDock, FloatingDockItem } from './ui/floating-dock';
 
 interface LayoutProps {
@@ -113,6 +114,8 @@ const Layout: React.FC<LayoutProps> = ({ children, className = '' }) => {
           </p>
         </div>
       </footer>
+
+      <PwaStatus />
     </div>
   );
 };

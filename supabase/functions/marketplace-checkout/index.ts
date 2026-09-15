@@ -78,14 +78,15 @@ const readConfiguredGstDiscountRate = (): number | null => {
 const notifySellersForPaidOrder = async (
   admin: ReturnType<typeof createClient>,
   orderId: string,
-): Promise<void> => {
+): Promise<Array<Record<string, unknown>>> => {
+  const notifications: Array<Record<string, unknown>> = [];
   const { data: order, error: orderError } = await admin
     .from('orders')
     .select('id, status, created_at, total_amount')
     .eq('id', orderId)
     .maybeSingle();
   if (orderError) throw orderError;
-  if (!order) return;
+  if (!order) return notifications;
 
   const orderRecord = asRecord(order);
   const orderStatus = toStringValue(orderRecord.status) || 'processing';
@@ -99,7 +100,7 @@ const notifySellersForPaidOrder = async (
 
   const items = (itemRows || []).map(asRecord);
   const vendorIds = uniqueStrings(items.map((row) => toStringValue(row.vendor_id)));
-  if (!vendorIds.length) return;
+  if (!vendorIds.length) return notifications;
 
   const productIds = uniqueStrings(items.map((row) => toStringValue(row.product_id)));
   const productsById = new Map<string, Record<string, unknown>>();
@@ -146,6 +147,7 @@ const notifySellersForPaidOrder = async (
     const profileName = toStringValue(asRecord(profile).full_name);
     if (profileName) sellerName = profileName;
 
+    // Fallback: vendor application email matched by profile name (still dynamic — never hardcoded).
     if (!isDeliverableEmail(sellerEmail)) {
       const { data: appsByName } = await admin
         .from('vendor_applications')
@@ -161,7 +163,14 @@ const notifySellersForPaidOrder = async (
     }
 
     if (!isDeliverableEmail(sellerEmail)) {
-      console.warn('[seller-email] no_deliverable_email_for_vendor', { orderId, vendorId });
+      console.warn('[seller-email] no_deliverable_email_for_vendor', { orderId, vendorId, sellerName });
+      notifications.push({
+        vendorId,
+        sellerName,
+        sent: false,
+        skipped: 'no_deliverable_email_for_vendor',
+        to: sellerEmail,
+      });
       continue;
     }
 
@@ -178,7 +187,7 @@ const notifySellersForPaidOrder = async (
       return { productName, quantity, unitPrice, subtotal };
     });
 
-    await sendSellerOrderEmail({
+    const sendResult = await sendSellerOrderEmail({
       to: sellerEmail!,
       sellerName,
       orderId,
@@ -188,7 +197,20 @@ const notifySellersForPaidOrder = async (
       dashboardUrl,
       idempotencyKey: `artisan-seller-order-${orderId}-${vendorId}`,
     });
+
+    notifications.push({
+      vendorId,
+      sellerName,
+      to: sendResult.to || sellerEmail,
+      sent: sendResult.sent,
+      skipped: sendResult.skipped ?? null,
+      error: sendResult.error ?? null,
+      providerId: sendResult.providerId ?? null,
+      lineCount: lines.length,
+    });
   }
+
+  return notifications;
 };
 
 const buildTrackingNumber = (orderId: string, sequence: number): string => {
@@ -410,7 +432,7 @@ serve(async (req) => {
           vendor_id: toStringValue(product.vendor_id),
           quantity: item.quantity,
           unit_price: unitPrice,
-          subtotal,
+          // subtotal may be a generated column in the live DB — do not insert it.
         });
       }
 
@@ -585,17 +607,20 @@ serve(async (req) => {
         }
 
         // Seller email is a best-effort side effect. Failures must never fail the order.
+        let sellerNotifications: Array<Record<string, unknown>> = [];
         try {
-          await notifySellersForPaidOrder(admin, orderId);
+          sellerNotifications = await notifySellersForPaidOrder(admin, orderId);
         } catch (notifyError) {
           console.error('[marketplace-checkout] seller_notify_failed', {
             orderId,
             message: readError(notifyError),
           });
         }
+
+        return json({ success: true, result: data, sellerNotifications });
       }
 
-      return json({ success: true, result: data });
+      return json({ success: true, result: data, sellerNotifications: [] });
     }
 
     if (action === 'retry_payment') {
