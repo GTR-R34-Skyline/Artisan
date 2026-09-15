@@ -76,8 +76,8 @@ export class TextChunkEmitter {
       }
 
       // Long phrase fallback: split at whitespace before TTS gets a giant blob.
-      if (rest.length >= 140) {
-        const splitAt = this.findPhraseSplit(rest, 110);
+      if (rest.length >= 80) {
+        const splitAt = this.findPhraseSplit(rest, 60);
         if (splitAt > 24) {
           const chunk = rest.slice(0, splitAt).trim();
           if (chunk) {

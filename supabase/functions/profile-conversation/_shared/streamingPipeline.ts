@@ -24,12 +24,6 @@ const normalizeForCartesia = (text: string): string =>
 
 const collapseWs = (text: string): string => text.replace(/\s+/g, ' ').trim();
 
-/**
- * Hindi/Bengali use danda (।). Sentence-streamed Cartesia calls have been unreliable for these
- * scripts (audio stops after the first danda). Speak the full final message in one Cartesia call.
- */
-const preferSingleShotTts = (language: SupportedLanguageCode): boolean =>
-  language === 'hi' || language === 'bn';
 
 export const encodeSse = (event: StreamEvent): Uint8Array =>
   encoder.encode(`event: ${event.event}\ndata: ${JSON.stringify(event.data)}\n\n`);
@@ -57,7 +51,6 @@ export async function* runStreamingProfileTurn(input: {
 
   const questionParser = new NextQuestionStreamParser();
   const chunkEmitter = new TextChunkEmitter();
-  const singleShot = preferSingleShotTts(input.selectedLanguage);
   let ttsIndex = 0;
   /** Text successfully synthesized (Cartesia returned audio). Never credit on schedule alone. */
   let spokenOk = '';
@@ -137,29 +130,9 @@ export async function* runStreamingProfileTurn(input: {
       });
   };
 
-  const splitOnIndicDanda = (text: string): string[] => {
-    const parts: string[] = [];
-    let buffer = '';
-    for (const char of text) {
-      buffer += char;
-      const code = char.codePointAt(0);
-      if (code === 0x0964 || code === 0x0965) {
-        const trimmed = buffer.trim();
-        if (trimmed) parts.push(trimmed);
-        buffer = '';
-      }
-    }
-    const tail = buffer.trim();
-    if (tail) parts.push(tail);
-    return parts;
-  };
-
   const enqueueSpeakableChunks = (textChunks: string[]) => {
-    if (singleShot) return; // Hindi/Bengali: defer until full canonical message.
     for (const chunk of textChunks) {
-      for (const piece of splitOnIndicDanda(chunk)) {
-        scheduleTts(piece);
-      }
+      scheduleTts(chunk);
     }
   };
 
@@ -242,51 +215,36 @@ export async function* runStreamingProfileTurn(input: {
   const streamedQuestion = questionParser.push('').full.trim();
   const canonical = (assistantMessage || streamedQuestion).trim();
 
-  if (!singleShot) {
-    if (canonical && canonical !== streamedQuestion) {
-      if (!spokenOk && !chunkEmitter.buffer.trim()) {
-        yield { event: 'assistant_text', data: { delta: canonical, text: canonical } };
-        enqueueSpeakableChunks(chunkEmitter.push(canonical));
-      } else if (canonical.startsWith(streamedQuestion) && canonical.length > streamedQuestion.length) {
-        const remainder = canonical.slice(streamedQuestion.length);
-        if (remainder.trim()) {
-          yield { event: 'assistant_text', data: { delta: remainder, text: canonical } };
-          enqueueSpeakableChunks(chunkEmitter.push(remainder));
-        }
-      }
-    } else if (canonical && !streamedQuestion) {
+  if (canonical && canonical !== streamedQuestion) {
+    if (!spokenOk && !chunkEmitter.buffer.trim()) {
       yield { event: 'assistant_text', data: { delta: canonical, text: canonical } };
       enqueueSpeakableChunks(chunkEmitter.push(canonical));
+    } else if (canonical.startsWith(streamedQuestion) && canonical.length > streamedQuestion.length) {
+      const remainder = canonical.slice(streamedQuestion.length);
+      if (remainder.trim()) {
+        yield { event: 'assistant_text', data: { delta: remainder, text: canonical } };
+        enqueueSpeakableChunks(chunkEmitter.push(remainder));
+      }
     }
-    enqueueSpeakableChunks(chunkEmitter.flush());
+  } else if (canonical && !streamedQuestion) {
+    yield { event: 'assistant_text', data: { delta: canonical, text: canonical } };
+    enqueueSpeakableChunks(chunkEmitter.push(canonical));
   }
+  enqueueSpeakableChunks(chunkEmitter.flush());
 
-  // Hindi/Bengali: one Cartesia call for the full final reply (danda normalized to '.').
-  // Other languages: coverage pass so failed mid-stream chunks still get spoken.
-  if (singleShot) {
-    if (canonical) {
-      console.info('[profile-voice] tts_single_shot', {
-        selectedLanguage: input.selectedLanguage,
-        chars: canonical.length,
-        preview: normalizeForCartesia(canonical).slice(0, 100),
-      });
-      scheduleTts(canonical);
-    }
-  } else {
-    const remainder = unsokenRemainder(canonical, spokenOk || collapseWs(chunkEmitter.buffer));
-    // Flush path may have scheduled but not completed yet — drain first then re-check.
-    yield* drainAudioQueue();
-    const afterDrainRemainder = unsokenRemainder(canonical, spokenOk);
-    if (afterDrainRemainder.length >= 2) {
-      console.info('[profile-voice] tts_flush_unsaid_remainder', {
-        selectedLanguage: input.selectedLanguage,
-        remainderChars: afterDrainRemainder.length,
-        preview: afterDrainRemainder.slice(0, 80),
-      });
-      scheduleTts(afterDrainRemainder);
-    } else if (remainder.length >= 2 && !spokenOk) {
-      scheduleTts(remainder);
-    }
+  const remainder = unsokenRemainder(canonical, spokenOk || collapseWs(chunkEmitter.buffer));
+  // Flush path may have scheduled but not completed yet — drain first then re-check.
+  yield* drainAudioQueue();
+  const afterDrainRemainder = unsokenRemainder(canonical, spokenOk);
+  if (afterDrainRemainder.length >= 2) {
+    console.info('[profile-voice] tts_flush_unsaid_remainder', {
+      selectedLanguage: input.selectedLanguage,
+      remainderChars: afterDrainRemainder.length,
+      preview: afterDrainRemainder.slice(0, 80),
+    });
+    scheduleTts(afterDrainRemainder);
+  } else if (remainder.length >= 2 && !spokenOk) {
+    scheduleTts(remainder);
   }
 
   if (firstTtsSentAt !== null) {
@@ -301,7 +259,6 @@ export async function* runStreamingProfileTurn(input: {
     chunks: ttsIndex,
     spokenOkChars: spokenOk.length,
     assistantChars: canonical.length,
-    singleShot,
   });
 
   yield* drainAudioQueue();
