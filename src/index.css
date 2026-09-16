@@ -560,6 +560,73 @@
   position: relative;
 }
 
+.shipment-detail-page {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.shipment-tracking-heading {
+  max-width: 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.shipment-detail-copy,
+.shipment-lifecycle span {
+  max-width: 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.shipment-advance-button {
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: 100%;
+  height: auto;
+  white-space: normal;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.confirm-dialog-overlay {
+  position: fixed;
+  z-index: 60;
+  inset: 0;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  overflow-y: auto;
+  padding:
+    max(1rem, env(safe-area-inset-top, 0px))
+    max(1rem, env(safe-area-inset-right, 0px))
+    max(1.25rem, env(safe-area-inset-bottom, 0px))
+    max(1rem, env(safe-area-inset-left, 0px));
+  background: rgba(29, 33, 29, 0.38);
+}
+
+.confirm-dialog-panel {
+  width: min(32rem, 100%);
+  max-height: min(36rem, calc(100dvh - 2rem));
+  overflow-x: hidden;
+  overflow-y: auto;
+  border: 1px solid rgba(29, 33, 29, 0.16);
+  background: #f4f1ea;
+  box-shadow: 0 24px 60px rgba(29, 33, 29, 0.18);
+}
+
+@media (min-width: 640px) {
+  .confirm-dialog-overlay {
+    align-items: center;
+    padding:
+      max(1.5rem, env(safe-area-inset-top, 0px))
+      max(1.5rem, env(safe-area-inset-right, 0px))
+      max(1.5rem, env(safe-area-inset-bottom, 0px))
+      max(1.5rem, env(safe-area-inset-left, 0px));
+  }
+}
+
 .workspace-header h1 {
   animation: float-in 900ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }

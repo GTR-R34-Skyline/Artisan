@@ -196,11 +196,11 @@ export const VendorShipmentsPanel: React.FC<VendorShipmentsPanelProps> = ({ vend
                 </div>
                 <div>
                   <dt className="text-[10px] font-semibold uppercase tracking-[0.16em] text-stone-500">Tracking</dt>
-                  <dd className="mt-1 text-stone-700">{shipment?.tracking_number || '—'}</dd>
+                  <dd className="mt-1 min-w-0 [overflow-wrap:anywhere] text-stone-700">{shipment?.tracking_number || '—'}</dd>
                 </div>
                 <div className="col-span-2">
                   <dt className="text-[10px] font-semibold uppercase tracking-[0.16em] text-stone-500">Destination</dt>
-                  <dd className="mt-1 text-stone-700">
+                  <dd className="mt-1 min-w-0 [overflow-wrap:anywhere] text-stone-700">
                     {shipment ? formatShipmentPlace(shipment.destination) : row.shippingAddress || '—'}
                   </dd>
                 </div>

@@ -1,4 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useId, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { ArrowUpRight, Check, Loader2 } from 'lucide-react';
 import { NoiseBackground } from './ui/noise-background';
 
@@ -70,7 +71,7 @@ export const Button: React.FC<{
       type={type}
       onClick={onClick}
       disabled={disabled}
-      className={`group relative inline-flex min-h-11 items-center justify-center gap-3 rounded-full px-5 py-3 text-xs font-semibold uppercase tracking-[0.16em] transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${styles[variant]} ${className}`}
+      className={`group relative inline-flex min-h-11 min-w-0 max-w-full items-center justify-center gap-3 rounded-full px-5 py-3 text-xs font-semibold uppercase tracking-[0.16em] transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${styles[variant]} ${className}`}
     >
       {children}
     </button>
@@ -171,8 +172,22 @@ export const Field: React.FC<{
   type?: string;
   textarea?: boolean;
   required?: boolean;
-}> = ({ label, value, onChange, placeholder, type = 'text', textarea = false, required = false }) => (
-  <label className="field block space-y-2">
+  min?: string | number;
+  step?: string | number;
+  inputMode?: React.HTMLAttributes<HTMLInputElement>['inputMode'];
+}> = ({
+  label,
+  value,
+  onChange,
+  placeholder,
+  type = 'text',
+  textarea = false,
+  required = false,
+  min,
+  step,
+  inputMode,
+}) => (
+  <label className="field block min-w-0 space-y-2">
     <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-stone-500">
       {label}
       {required && <span className="ml-1 text-emerald-700">*</span>}
@@ -193,11 +208,93 @@ export const Field: React.FC<{
         onChange={onChange}
         placeholder={placeholder}
         required={required}
-        className="w-full border-b border-stone-300 bg-transparent px-0 py-3 text-sm text-stone-950 outline-none transition-colors placeholder:text-stone-400 focus:border-stone-950"
+        min={min}
+        step={step}
+        inputMode={inputMode}
+        className="w-full min-w-0 border-b border-stone-300 bg-transparent px-0 py-3 text-sm text-stone-950 outline-none transition-colors placeholder:text-stone-400 focus:border-stone-950"
       />
     )}
   </label>
 );
+
+export const ConfirmDialog: React.FC<{
+  open: boolean;
+  title: string;
+  children: React.ReactNode;
+  cancelLabel?: string;
+  confirmLabel: string;
+  onCancel: () => void;
+  onConfirm: () => void;
+  confirming?: boolean;
+  confirmDisabled?: boolean;
+  error?: string;
+}> = ({
+  open,
+  title,
+  children,
+  cancelLabel = 'Cancel',
+  confirmLabel,
+  onCancel,
+  onConfirm,
+  confirming = false,
+  confirmDisabled = false,
+  error,
+}) => {
+  const titleId = useId();
+  const dialogRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !confirming) onCancel();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    dialogRef.current?.focus();
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [confirming, onCancel, open]);
+
+  if (!open || typeof document === 'undefined') return null;
+
+  return createPortal(
+    <div
+      className="confirm-dialog-overlay"
+      role="presentation"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !confirming) onCancel();
+      }}
+    >
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+        className="confirm-dialog-panel p-6 sm:p-8"
+      >
+        <Eyebrow>Please confirm</Eyebrow>
+        <h2 id={titleId} className="mt-3 font-display text-3xl leading-tight tracking-[-0.03em] text-stone-950 [overflow-wrap:anywhere]">
+          {title}
+        </h2>
+        <div className="mt-6 min-w-0 space-y-4 text-sm leading-7 text-stone-700">{children}</div>
+        {error && <p className="mt-5 min-w-0 [overflow-wrap:anywhere] text-sm text-red-700">{error}</p>}
+        <div className="mt-8 flex min-w-0 flex-col-reverse gap-3 sm:flex-row sm:justify-end">
+          <Button variant="light" className="w-full sm:w-auto" onClick={onCancel} disabled={confirming}>
+            {cancelLabel}
+          </Button>
+          <Button className="w-full sm:w-auto" onClick={onConfirm} disabled={confirming || confirmDisabled}>
+            {confirming ? 'Updating' : confirmLabel}
+          </Button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+};
 
 export const CompletionMark: React.FC = () => (
   <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-emerald-700 text-white">

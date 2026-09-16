@@ -156,7 +156,26 @@ const VendorDashboard: React.FC = () => {
 
           {view === 'products' && (
             <section className="py-12">
-              <ProductPerformance rows={analytics.productRows} />
+              <ProductPerformance
+                rows={analytics.productRows}
+                onPriceUpdated={(productId, finalPrice) => {
+                  setAnalytics((current) => ({
+                    ...current,
+                    products: current.products.map((product) =>
+                      product.id === productId ? { ...product, final_price: finalPrice } : product,
+                    ),
+                    productRows: current.productRows.map((row) =>
+                      row.product.id === productId
+                        ? {
+                            ...row,
+                            price: finalPrice,
+                            product: { ...row.product, final_price: finalPrice },
+                          }
+                        : row,
+                    ),
+                  }));
+                }}
+              />
             </section>
           )}
 

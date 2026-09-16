@@ -2,12 +2,14 @@ import React, { useMemo, useState } from 'react';
 import { Star } from 'lucide-react';
 import { EmptyState, StatusLabel } from '../DesignSystem';
 import { ProductPerformanceRow, ProductPerformanceSort } from '../../types/analytics';
-import { getProductImage, getProductTitle } from '../../types/marketplace';
+import { getProductImage, getProductTitle, MarketplaceProduct } from '../../types/marketplace';
 import { formatRating, formatRupees } from './formatters';
 import { ProductThumb } from './ProductThumb';
+import { ProductPriceEditor } from '../vendor/ProductPriceEditor';
 
 interface ProductPerformanceProps {
   rows: ProductPerformanceRow[];
+  onPriceUpdated?: (productId: string, finalPrice: number) => void;
 }
 
 const SORTS: Array<{ id: ProductPerformanceSort; label: string }> = [
@@ -45,13 +47,18 @@ const RatingValue: React.FC<{ value: number | null; count: number }> = ({ value,
   );
 };
 
-export const ProductPerformance: React.FC<ProductPerformanceProps> = ({ rows }) => {
+export const ProductPerformance: React.FC<ProductPerformanceProps> = ({ rows, onPriceUpdated }) => {
   const [sort, setSort] = useState<ProductPerformanceSort>('best_selling');
+  const [editingProduct, setEditingProduct] = useState<MarketplaceProduct | null>(null);
   const sorted = useMemo(() => sortRows(rows, sort), [rows, sort]);
 
   if (!rows.length) {
     return <EmptyState title="Your collection starts here." description="Add your first piece and performance details will appear in this workspace." />;
   }
+
+  const openEditor = (product: MarketplaceProduct) => {
+    setEditingProduct(product);
+  };
 
   return (
     <section className="space-y-8">
@@ -74,6 +81,17 @@ export const ProductPerformance: React.FC<ProductPerformanceProps> = ({ rows }) 
         </div>
       </div>
 
+      {editingProduct && (
+        <ProductPriceEditor
+          product={editingProduct}
+          onClose={() => setEditingProduct(null)}
+          onUpdated={(finalPrice) => {
+            setEditingProduct((current) => (current ? { ...current, final_price: finalPrice } : current));
+            onPriceUpdated?.(editingProduct.id, finalPrice);
+          }}
+        />
+      )}
+
       <div className="hidden overflow-x-auto lg:block">
         <table className="analytics-table w-full min-w-[860px] text-left text-sm">
           <thead>
@@ -84,7 +102,8 @@ export const ProductPerformance: React.FC<ProductPerformanceProps> = ({ rows }) 
               <th className="py-4 pr-6">Revenue</th>
               <th className="py-4 pr-6">Stock</th>
               <th className="py-4 pr-6">Rating</th>
-              <th className="py-4 text-right">Price</th>
+              <th className="py-4 pr-6 text-right">Price</th>
+              <th className="py-4 text-right">Action</th>
             </tr>
           </thead>
           <tbody>
@@ -112,7 +131,16 @@ export const ProductPerformance: React.FC<ProductPerformanceProps> = ({ rows }) 
                   <span className={row.stock <= 5 ? 'text-amber-800' : 'text-stone-950'}>{row.stock.toLocaleString('en-IN')}</span>
                 </td>
                 <td className="py-4 pr-6"><RatingValue value={row.averageRating} count={row.reviewCount} /></td>
-                <td className="py-4 text-right text-stone-950">{row.price !== null ? formatRupees(row.price) : '—'}</td>
+                <td className="py-4 pr-6 text-right text-stone-950">{row.price !== null ? formatRupees(row.price) : '—'}</td>
+                <td className="py-4 text-right">
+                  <button
+                    type="button"
+                    onClick={() => openEditor(row.product)}
+                    className="text-[10px] font-semibold uppercase tracking-[0.16em] text-stone-950"
+                  >
+                    Edit price
+                  </button>
+                </td>
               </tr>
             ))}
           </tbody>
@@ -143,6 +171,13 @@ export const ProductPerformance: React.FC<ProductPerformanceProps> = ({ rows }) 
               <div><dt className="text-[10px] uppercase tracking-[0.16em] text-stone-500">Price</dt><dd className="mt-1">{row.price !== null ? formatRupees(row.price) : '—'}</dd></div>
               <div className="col-span-2"><dt className="text-[10px] uppercase tracking-[0.16em] text-stone-500">Rating</dt><dd className="mt-1"><RatingValue value={row.averageRating} count={row.reviewCount} /></dd></div>
             </dl>
+            <button
+              type="button"
+              onClick={() => openEditor(row.product)}
+              className="mt-5 text-[10px] font-semibold uppercase tracking-[0.16em] text-stone-950"
+            >
+              Edit price
+            </button>
           </article>
         ))}
       </div>

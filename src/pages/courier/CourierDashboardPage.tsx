@@ -151,8 +151,8 @@ const CourierDashboardPage: React.FC = () => {
                 to={`/courier/shipments/${shipment.id}`}
                 className="block border border-stone-300 p-5"
               >
-                <div className="flex items-start justify-between gap-4">
-                  <p className="font-medium text-stone-950">{shipment.tracking_number || 'No tracking number'}</p>
+                <div className="flex min-w-0 items-start justify-between gap-4">
+                  <p className="min-w-0 [overflow-wrap:anywhere] font-medium text-stone-950">{shipment.tracking_number || 'No tracking number'}</p>
                   <StatusLabel tone={shipmentStatusTone(shipment.status)}>
                     {shipmentStatusLabel(shipment.status)}
                   </StatusLabel>
@@ -168,7 +168,7 @@ const CourierDashboardPage: React.FC = () => {
                   </div>
                   <div className="col-span-2">
                     <dt className="text-[10px] font-semibold uppercase tracking-[0.16em] text-stone-500">Destination</dt>
-                    <dd className="mt-1 text-stone-700">{formatShipmentPlace(shipment.destination)}</dd>
+                    <dd className="mt-1 min-w-0 [overflow-wrap:anywhere] text-stone-700">{formatShipmentPlace(shipment.destination)}</dd>
                   </div>
                   <div className="col-span-2">
                     <dt className="text-[10px] font-semibold uppercase tracking-[0.16em] text-stone-500">Est. delivery</dt>

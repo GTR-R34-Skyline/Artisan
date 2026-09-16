@@ -93,7 +93,7 @@ const ShipmentDetailPage: React.FC = () => {
 
   if (loading) {
     return (
-      <div className="mx-auto max-w-[1400px] px-6 py-16 lg:px-10">
+      <div className="shipment-detail-page mx-auto max-w-[1400px] px-6 py-16 lg:px-10">
         <LoadingState label="Opening shipment" />
       </div>
     );
@@ -101,12 +101,12 @@ const ShipmentDetailPage: React.FC = () => {
 
   if (error || !shipment) {
     return (
-      <div className="mx-auto max-w-[1400px] px-6 py-16 lg:px-10">
+      <div className="shipment-detail-page mx-auto max-w-[1400px] px-6 py-16 lg:px-10">
         <Link
           to="/courier/dashboard"
           className="mb-10 inline-flex items-center gap-3 text-[10px] font-semibold uppercase tracking-[0.18em] text-stone-500 hover:text-stone-950"
         >
-          <ArrowLeft className="h-4 w-4" strokeWidth={1.5} /> All shipments
+          <ArrowLeft className="h-4 w-4 shrink-0" strokeWidth={1.5} /> All shipments
         </Link>
         <EmptyState title="Shipment unavailable." description={error || 'This shipment could not be found.'} />
       </div>
@@ -114,45 +114,49 @@ const ShipmentDetailPage: React.FC = () => {
   }
 
   return (
-    <div className="mx-auto max-w-[1400px] px-6 pb-28 pt-10 lg:px-10 lg:pt-16">
+    <div className="shipment-detail-page mx-auto max-w-[1400px] px-6 pb-28 pt-10 lg:px-10 lg:pt-16">
       <Link
         to="/courier/dashboard"
-        className="mb-10 inline-flex items-center gap-3 text-[10px] font-semibold uppercase tracking-[0.18em] text-stone-500 hover:text-stone-950"
+        className="mb-10 inline-flex min-w-0 items-center gap-3 text-[10px] font-semibold uppercase tracking-[0.18em] text-stone-500 hover:text-stone-950"
       >
-        <ArrowLeft className="h-4 w-4" strokeWidth={1.5} /> All shipments
+        <ArrowLeft className="h-4 w-4 shrink-0" strokeWidth={1.5} /> All shipments
       </Link>
 
-      <header className="grid gap-10 border-b border-stone-300 pb-12 lg:grid-cols-[1fr_0.7fr] lg:items-end">
-        <div className="space-y-5">
+      <header className="grid min-w-0 gap-10 border-b border-stone-300 pb-12 lg:grid-cols-[minmax(0,1fr)_minmax(0,0.7fr)] lg:items-end">
+        <div className="min-w-0 space-y-5">
           <Eyebrow>Shipment</Eyebrow>
-          <h1 className="font-display text-5xl leading-[0.95] tracking-[-0.04em] text-stone-950 sm:text-7xl">
+          <h1 className="shipment-tracking-heading font-display text-5xl leading-[1.05] tracking-[-0.04em] text-stone-950 sm:text-7xl">
             {shipment.tracking_number || 'No tracking number'}
           </h1>
           <StatusLabel tone={shipmentStatusTone(shipment.status)}>
             {shipmentStatusLabel(shipment.status)}
           </StatusLabel>
         </div>
-        <div className="space-y-4 lg:justify-self-end">
+        <div className="min-w-0 space-y-4 lg:justify-self-end lg:text-right">
           {delivered ? (
-            <p className="text-sm leading-7 text-stone-600">This shipment has been delivered. No further courier actions are available.</p>
+            <p className="shipment-detail-copy text-sm leading-7 text-stone-600">This shipment has been delivered. No further courier actions are available.</p>
           ) : nextStatus ? (
             <>
-              <p className="text-sm leading-7 text-stone-600">
+              <p className="shipment-detail-copy text-sm leading-7 text-stone-600">
                 Next stage: {shipmentStatusLabel(nextStatus)}. Stages cannot be skipped.
               </p>
-              <Button onClick={() => { void handleAdvance(); }} disabled={advancing}>
+              <Button
+                onClick={() => { void handleAdvance(); }}
+                disabled={advancing}
+                className="shipment-advance-button w-full max-w-full whitespace-normal sm:w-auto"
+              >
                 {advancing ? 'Updating shipment' : `Mark as ${shipmentStatusLabel(nextStatus)}`}
               </Button>
             </>
           ) : (
-            <p className="text-sm leading-7 text-stone-600">This shipment cannot be advanced from its current status.</p>
+            <p className="shipment-detail-copy text-sm leading-7 text-stone-600">This shipment cannot be advanced from its current status.</p>
           )}
         </div>
       </header>
 
-      {actionError && <p className="border-b border-stone-300 py-5 text-sm text-red-700">{actionError}</p>}
+      {actionError && <p className="shipment-detail-copy border-b border-stone-300 py-5 text-sm text-red-700">{actionError}</p>}
 
-      <nav className="flex flex-wrap gap-x-7 gap-y-4 border-b border-stone-300 py-6">
+      <nav className="shipment-lifecycle flex min-w-0 flex-wrap gap-x-7 gap-y-4 border-b border-stone-300 py-6">
         {SHIPMENT_LIFECYCLE.map((status) => {
           const currentIndex = SHIPMENT_LIFECYCLE.indexOf(shipment.status as (typeof SHIPMENT_LIFECYCLE)[number]);
           const stepIndex = SHIPMENT_LIFECYCLE.indexOf(status);
@@ -161,7 +165,7 @@ const ShipmentDetailPage: React.FC = () => {
           return (
             <span
               key={status}
-              className={`text-[10px] font-semibold uppercase tracking-[0.16em] ${
+              className={`max-w-full text-[10px] font-semibold uppercase tracking-[0.16em] ${
                 current ? 'text-stone-950' : reached ? 'text-forest' : 'text-stone-400'
               }`}
             >
@@ -171,20 +175,20 @@ const ShipmentDetailPage: React.FC = () => {
         })}
       </nav>
 
-      <div className="mt-12 grid gap-10 lg:grid-cols-[1fr_0.45fr]">
-        <section className="space-y-8">
-          <div className="border border-stone-300 p-6">
+      <div className="mt-12 grid min-w-0 gap-10 lg:grid-cols-[minmax(0,1fr)_minmax(0,0.45fr)]">
+        <section className="min-w-0 space-y-8">
+          <div className="min-w-0 border border-stone-300 p-5 sm:p-6">
             <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-stone-500">Shipment details</p>
-            <dl className="mt-6 grid gap-5 text-sm sm:grid-cols-2">
-              <div>
+            <dl className="mt-6 grid min-w-0 gap-5 text-sm sm:grid-cols-2">
+              <div className="min-w-0">
                 <dt className="text-[10px] font-semibold uppercase tracking-[0.16em] text-stone-500">Tracking number</dt>
-                <dd className="mt-1 text-stone-950">{shipment.tracking_number || '—'}</dd>
+                <dd className="shipment-detail-copy mt-1 text-stone-950">{shipment.tracking_number || '—'}</dd>
               </div>
-              <div>
+              <div className="min-w-0">
                 <dt className="text-[10px] font-semibold uppercase tracking-[0.16em] text-stone-500">Order ID</dt>
-                <dd className="mt-1 break-all text-stone-950">{shipment.order_id || '—'}</dd>
+                <dd className="shipment-detail-copy mt-1 text-stone-950">{shipment.order_id || '—'}</dd>
               </div>
-              <div>
+              <div className="min-w-0">
                 <dt className="text-[10px] font-semibold uppercase tracking-[0.16em] text-stone-500">Current status</dt>
                 <dd className="mt-1">
                   <StatusLabel tone={shipmentStatusTone(shipment.status)}>
@@ -192,44 +196,44 @@ const ShipmentDetailPage: React.FC = () => {
                   </StatusLabel>
                 </dd>
               </div>
-              <div>
+              <div className="min-w-0">
                 <dt className="text-[10px] font-semibold uppercase tracking-[0.16em] text-stone-500">Carrier</dt>
-                <dd className="mt-1 text-stone-950">{shipment.carrier || '—'}</dd>
+                <dd className="shipment-detail-copy mt-1 text-stone-950">{shipment.carrier || '—'}</dd>
               </div>
-              <div>
+              <div className="min-w-0">
                 <dt className="text-[10px] font-semibold uppercase tracking-[0.16em] text-stone-500">Origin</dt>
-                <dd className="mt-1 text-stone-950">{formatShipmentPlace(shipment.origin)}</dd>
+                <dd className="shipment-detail-copy mt-1 text-stone-950">{formatShipmentPlace(shipment.origin)}</dd>
               </div>
-              <div>
+              <div className="min-w-0">
                 <dt className="text-[10px] font-semibold uppercase tracking-[0.16em] text-stone-500">Destination</dt>
-                <dd className="mt-1 text-stone-950">{formatShipmentPlace(shipment.destination)}</dd>
+                <dd className="shipment-detail-copy mt-1 text-stone-950">{formatShipmentPlace(shipment.destination)}</dd>
               </div>
-              <div className="sm:col-span-2">
+              <div className="min-w-0 sm:col-span-2">
                 <dt className="text-[10px] font-semibold uppercase tracking-[0.16em] text-stone-500">Estimated delivery date</dt>
-                <dd className="mt-1 text-stone-950">{formatShipmentDateOnly(shipment.estimated_delivery_date)}</dd>
+                <dd className="shipment-detail-copy mt-1 text-stone-950">{formatShipmentDateOnly(shipment.estimated_delivery_date)}</dd>
               </div>
             </dl>
           </div>
 
-          <div className="border border-stone-300 p-6">
+          <div className="min-w-0 border border-stone-300 p-5 sm:p-6">
             <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-stone-500">Timeline</p>
             {events.length ? (
-              <ol className="mt-8 space-y-0">
+              <ol className="mt-8 min-w-0 space-y-0">
                 {events.map((event, index) => (
-                  <li key={event.id} className="grid grid-cols-[1rem_1fr] gap-4">
+                  <li key={event.id} className="grid min-w-0 grid-cols-[1rem_minmax(0,1fr)] gap-4">
                     <div className="flex flex-col items-center">
-                      <span className={`mt-1 h-2.5 w-2.5 rounded-full ${index === events.length - 1 ? 'bg-stone-950' : 'bg-forest'}`} />
+                      <span className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full ${index === events.length - 1 ? 'bg-stone-950' : 'bg-forest'}`} />
                       {index < events.length - 1 && <span className="w-px flex-1 bg-stone-300" />}
                     </div>
-                    <div className={index < events.length - 1 ? 'pb-8' : ''}>
-                      <div className="flex flex-wrap items-center gap-3">
+                    <div className={`min-w-0 ${index < events.length - 1 ? 'pb-8' : ''}`}>
+                      <div className="flex min-w-0 flex-wrap items-center gap-3">
                         <p className="text-sm font-medium text-stone-950">{shipmentStatusLabel(event.status)}</p>
                         <span className="text-[10px] uppercase tracking-[0.14em] text-stone-500">
                           {formatShipmentDate(event.event_time || event.created_at)}
                         </span>
                       </div>
-                      <p className="mt-2 text-sm leading-6 text-stone-600">{event.description || '—'}</p>
-                      <p className="mt-1 text-xs text-stone-500">{event.location || '—'}</p>
+                      <p className="shipment-detail-copy mt-2 text-sm leading-6 text-stone-600">{event.description || '—'}</p>
+                      <p className="shipment-detail-copy mt-1 text-xs text-stone-500">{event.location || '—'}</p>
                     </div>
                   </li>
                 ))}
@@ -240,16 +244,16 @@ const ShipmentDetailPage: React.FC = () => {
           </div>
         </section>
 
-        <aside className="space-y-6">
-          <div className="border border-stone-300 p-6">
+        <aside className="min-w-0 space-y-6">
+          <div className="min-w-0 border border-stone-300 p-5 sm:p-6">
             <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-stone-500">Pickup</p>
-            <p className="mt-3 text-sm leading-7 text-stone-600">
+            <p className="shipment-detail-copy mt-3 text-sm leading-7 text-stone-600">
               {shipment.picked_up_at ? `Picked up ${formatShipmentDate(shipment.picked_up_at)}.` : 'Not picked up yet.'}
             </p>
           </div>
-          <div className="border border-stone-300 p-6">
+          <div className="min-w-0 border border-stone-300 p-5 sm:p-6">
             <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-stone-500">Delivery</p>
-            <p className="mt-3 text-sm leading-7 text-stone-600">
+            <p className="shipment-detail-copy mt-3 text-sm leading-7 text-stone-600">
               {shipment.delivered_at ? `Delivered ${formatShipmentDate(shipment.delivered_at)}.` : 'Not delivered yet.'}
             </p>
           </div>
