@@ -11,7 +11,7 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:reviews": "node scripts/test-product-reviews.mjs",
-    "test:checkout": "node scripts/test-mock-checkout.mjs",
+    "test:checkout": "node scripts/test-razorpay-checkout.mjs",
     "whatsapp": "node whatsapp-service/index.js",
     "whatsapp:server": "node whatsapp-service/server.js",
     "whatsapp:bridge": "node whatsapp-service/bridge.js",

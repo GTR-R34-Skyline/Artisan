@@ -5,8 +5,7 @@ import {
   CheckoutOrderItem,
   CheckoutPayment,
   CheckoutSnapshot,
-  MockPaymentOutcome,
-  MockUpiApp,
+  RazorpayCheckoutSession,
 } from '../types/checkout';
 import { CartItem } from '../types/checkout';
 
@@ -158,31 +157,55 @@ export const getCheckoutSnapshot = async (orderId: string): Promise<CheckoutSnap
   };
 };
 
-export const processMockPayment = async (input: {
+export const createRazorpayCheckoutSession = async (orderId: string): Promise<RazorpayCheckoutSession> => {
+  const { data, error } = await supabase.functions.invoke('marketplace-checkout', {
+    body: { action: 'create_razorpay_order', orderId },
+  });
+
+  if (error) throw new Error(await readFunctionError(error));
+  const payload = asRecord(data);
+  if (!payload.success) throw new Error(toStringValue(payload.error) || 'Razorpay checkout could not be prepared.');
+
+  const keyId = toStringValue(payload.keyId);
+  const razorpayOrderId = toStringValue(payload.razorpayOrderId);
+  if (!keyId || !razorpayOrderId) {
+    throw new Error('Razorpay checkout session is incomplete.');
+  }
+
+  return {
+    keyId,
+    razorpayOrderId,
+    amount: toNumber(payload.amount),
+    amountPaise: Math.round(toNumber(payload.amountPaise)),
+    currency: toStringValue(payload.currency) || 'INR',
+    artisanOrderId: toStringValue(payload.artisanOrderId) || orderId,
+    reused: Boolean(payload.reused),
+  };
+};
+
+export const verifyRazorpayPayment = async (input: {
   orderId: string;
-  mockOutcome: MockPaymentOutcome;
-  upiApp: MockUpiApp;
-  upiId?: string;
-  transactionId?: string | null;
+  razorpayOrderId: string;
+  razorpayPaymentId: string;
+  razorpaySignature: string;
 }): Promise<Record<string, unknown>> => {
   const { data, error } = await supabase.functions.invoke('marketplace-checkout', {
     body: {
-      action: 'process_payment',
+      action: 'verify_razorpay_payment',
       orderId: input.orderId,
-      mockOutcome: input.mockOutcome,
-      upiApp: input.upiApp,
-      upiId: input.upiId,
-      transactionId: input.transactionId,
+      razorpayOrderId: input.razorpayOrderId,
+      razorpayPaymentId: input.razorpayPaymentId,
+      razorpaySignature: input.razorpaySignature,
     },
   });
 
   if (error) throw new Error(await readFunctionError(error));
   const payload = asRecord(data);
-  if (!payload.success) throw new Error(toStringValue(payload.error) || 'Payment could not be processed.');
+  if (!payload.success) throw new Error(toStringValue(payload.error) || 'Payment verification failed.');
   return asRecord(payload.result);
 };
 
-export const retryMockPayment = async (orderId: string): Promise<Record<string, unknown>> => {
+export const retryCheckoutPayment = async (orderId: string): Promise<Record<string, unknown>> => {
   const { data, error } = await supabase.functions.invoke('marketplace-checkout', {
     body: { action: 'retry_payment', orderId },
   });
@@ -193,12 +216,112 @@ export const retryMockPayment = async (orderId: string): Promise<Record<string, 
   return asRecord(payload.result);
 };
 
-export const resolveMockOutcomeFromUpiId = (upiId: string): MockPaymentOutcome | null => {
-  const normalized = upiId.trim().toLowerCase();
-  if (normalized.endsWith('@success') || normalized === 'success@mockupi') return 'success';
-  if (normalized.endsWith('@fail') || normalized.endsWith('@failed') || normalized === 'fail@mockupi') return 'failed';
-  if (normalized.endsWith('@pending') || normalized === 'pending@mockupi') return 'pending';
-  return null;
+export const formatCurrency = (amount: number): string => `₹${amount.toLocaleString('en-IN')}`;
+
+type RazorpayHandlerResponse = {
+  razorpay_payment_id: string;
+  razorpay_order_id: string;
+  razorpay_signature: string;
 };
 
-export const formatCurrency = (amount: number): string => `₹${amount.toLocaleString('en-IN')}`;
+type RazorpayCheckoutOptions = {
+  key: string;
+  amount: number;
+  currency: string;
+  name: string;
+  description: string;
+  order_id: string;
+  prefill?: { name?: string; email?: string; contact?: string };
+  theme?: { color?: string };
+  handler: (response: RazorpayHandlerResponse) => void;
+  modal?: { ondismiss?: () => void };
+};
+
+type RazorpayInstance = {
+  open: () => void;
+  on?: (event: string, handler: (response: unknown) => void) => void;
+};
+
+declare global {
+  interface Window {
+    Razorpay?: new (options: RazorpayCheckoutOptions) => RazorpayInstance;
+  }
+}
+
+let razorpayScriptPromise: Promise<void> | null = null;
+
+export const loadRazorpayCheckoutScript = (): Promise<void> => {
+  if (typeof window === 'undefined') {
+    return Promise.reject(new Error('Razorpay checkout is only available in the browser.'));
+  }
+  if (window.Razorpay) return Promise.resolve();
+  if (razorpayScriptPromise) return razorpayScriptPromise;
+
+  razorpayScriptPromise = new Promise((resolve, reject) => {
+    const existing = document.querySelector<HTMLScriptElement>('script[data-artisan-razorpay="1"]');
+    if (existing) {
+      existing.addEventListener('load', () => resolve());
+      existing.addEventListener('error', () => reject(new Error('Razorpay checkout could not be loaded.')));
+      return;
+    }
+
+    const script = document.createElement('script');
+    script.src = 'https://checkout.razorpay.com/v1/checkout.js';
+    script.async = true;
+    script.dataset.artisanRazorpay = '1';
+    script.onload = () => resolve();
+    script.onerror = () => {
+      razorpayScriptPromise = null;
+      reject(new Error('Razorpay checkout could not be loaded.'));
+    };
+    document.body.appendChild(script);
+  });
+
+  return razorpayScriptPromise;
+};
+
+export const openRazorpayCheckout = async (input: {
+  session: RazorpayCheckoutSession;
+  customerName?: string | null;
+  customerEmail?: string | null;
+  customerPhone?: string | null;
+  onSuccess: (response: RazorpayHandlerResponse) => void;
+  onDismiss: () => void;
+  onFailure?: (message: string) => void;
+}): Promise<void> => {
+  await loadRazorpayCheckoutScript();
+  if (!window.Razorpay) {
+    throw new Error('Razorpay checkout is unavailable.');
+  }
+
+  const checkout = new window.Razorpay({
+    key: input.session.keyId,
+    amount: input.session.amountPaise,
+    currency: input.session.currency || 'INR',
+    name: 'ARTISAN',
+    description: `Order ${input.session.artisanOrderId.slice(0, 8)}`,
+    order_id: input.session.razorpayOrderId,
+    prefill: {
+      name: input.customerName || undefined,
+      email: input.customerEmail || undefined,
+      contact: input.customerPhone || undefined,
+    },
+    theme: { color: '#264336' },
+    handler: input.onSuccess,
+    modal: {
+      ondismiss: input.onDismiss,
+    },
+  });
+
+  checkout.on?.('payment.failed', (response) => {
+    const record = asRecord(response);
+    const error = asRecord(record.error);
+    const message =
+      toStringValue(error.description) ||
+      toStringValue(error.reason) ||
+      'The payment could not be completed.';
+    input.onFailure?.(message);
+  });
+
+  checkout.open();
+};

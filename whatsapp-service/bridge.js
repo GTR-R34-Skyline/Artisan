@@ -2,7 +2,7 @@
  * Local purchase→WhatsApp bridge (TEST/DEMO).
  *
  * Cloud Edge Functions cannot reach 127.0.0.1 on your PC. This bridge watches
- * successful mock payments via Supabase (existing tables only) and calls the
+ * successful payments via Supabase (existing tables only) and calls the
  * local WhatsApp sender — keeping Resend email on the Edge path unchanged.
  *
  * Idempotency: in-memory key artisan-seller-whatsapp-{orderId}-{vendorId}

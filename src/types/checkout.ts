@@ -33,20 +33,27 @@ export interface CheckoutPayment {
   status: string;
   amount: number;
   transactionId: string | null;
+  /** Legacy column: stores Razorpay Order ID during/after Razorpay checkout. */
   upiApp: string | null;
+  /** ARTISAN instrument: upi | card | netbanking | cod (Razorpay is the gateway, not this value). */
   paymentMethod: string | null;
 }
 
-export type MockUpiApp = 'Google Pay' | 'PhonePe' | 'Paytm' | 'UPI ID' | 'QR';
-export type MockPaymentOutcome = 'success' | 'failed' | 'pending';
+export interface RazorpayCheckoutSession {
+  keyId: string;
+  razorpayOrderId: string;
+  amount: number;
+  amountPaise: number;
+  currency: string;
+  artisanOrderId: string;
+  reused: boolean;
+}
 
 export interface CheckoutSnapshot {
   order: CheckoutOrder;
   items: CheckoutOrderItem[];
   payment: CheckoutPayment | null;
 }
-
-export const MOCK_UPI_APPS: MockUpiApp[] = ['Google Pay', 'PhonePe', 'Paytm', 'UPI ID', 'QR'];
 
 export const CHECKOUT_SESSION_KEY = 'artisan.checkout.idempotency';
 

@@ -1,10 +1,20 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { isDeliverableEmail, sendSellerOrderEmail } from '../_shared/sellerEmail.ts';
+import {
+  createRazorpayOrder,
+  fetchRazorpayPayment,
+  inrToPaise,
+  isSuccessfulRazorpayPaymentStatus,
+  mapRazorpayInstrumentToPaymentMethod,
+  verifyCheckoutPaymentSignature,
+  verifyWebhookSignature,
+} from '../_shared/razorpay.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Allow-Headers':
+    'authorization, x-client-info, apikey, content-type, x-razorpay-signature',
 };
 
 /**
@@ -313,6 +323,127 @@ interface CartItemInput {
   quantity: number;
 }
 
+const readRazorpayCredentials = (): { keyId: string; keySecret: string } => {
+  const keyId = Deno.env.get('RAZORPAY_KEY_ID') || '';
+  const keySecret = Deno.env.get('RAZORPAY_KEY_SECRET') || '';
+  if (!keyId || !keySecret) {
+    throw new Error('Razorpay is not configured on the server.');
+  }
+  return { keyId, keySecret };
+};
+
+/** Values allowed by payments_payment_method_check — Razorpay is the gateway, not a method. */
+const ALLOWED_PAYMENT_METHODS = new Set(['upi', 'card', 'netbanking', 'cod']);
+
+/**
+ * Existing payments schema mapping (no migration):
+ * - payment_method = allowed instrument ('upi' | 'card' | 'netbanking' | 'cod')
+ * - upi_app = Razorpay Order ID (provider order reference; legacy column)
+ * - transaction_id = Razorpay Payment ID after capture (never MOCK-UPI-*)
+ */
+const fulfillVerifiedRazorpayPayment = async (
+  admin: ReturnType<typeof createClient>,
+  input: {
+    artisanOrderId: string;
+    buyerId: string;
+    razorpayOrderId: string;
+    razorpayPaymentId: string;
+    paymentMethod?: string | null;
+  },
+): Promise<{ result: Record<string, unknown>; sellerNotifications: Array<Record<string, unknown>>; idempotent: boolean }> => {
+  const artisanPaymentMethod = ALLOWED_PAYMENT_METHODS.has((input.paymentMethod || '').toLowerCase())
+    ? (input.paymentMethod || 'upi').toLowerCase()
+    : mapRazorpayInstrumentToPaymentMethod(input.paymentMethod);
+
+  const { data: existingPayment, error: existingPaymentError } = await admin
+    .from('payments')
+    .select('id, status, amount, transaction_id, upi_app, payment_method')
+    .eq('order_id', input.artisanOrderId)
+    .maybeSingle();
+  if (existingPaymentError) throw existingPaymentError;
+
+  const existing = asRecord(existingPayment);
+  if (toStringValue(existing.status)?.toLowerCase() === 'success') {
+    try {
+      await ensureShipmentsForPaidOrder(admin, input.artisanOrderId);
+    } catch (shipmentError) {
+      console.error('[marketplace-checkout] shipment_prep_failed_idempotent', {
+        orderId: input.artisanOrderId,
+        message: readError(shipmentError),
+      });
+    }
+    return {
+      idempotent: true,
+      result: {
+        idempotent: true,
+        order_id: input.artisanOrderId,
+        payment_status: 'success',
+        payment_method: toStringValue(existing.payment_method) || artisanPaymentMethod,
+        transaction_id: toStringValue(existing.transaction_id),
+        razorpay_order_id: toStringValue(existing.upi_app),
+        razorpay_payment_id: toStringValue(existing.transaction_id),
+      },
+      sellerNotifications: [],
+    };
+  }
+
+  const { data, error } = await admin.rpc('finalize_mock_upi_payment', {
+    p_order_id: input.artisanOrderId,
+    p_buyer_id: input.buyerId,
+    p_outcome: 'success',
+    p_upi_app: input.razorpayOrderId,
+    p_upi_id: null,
+    p_transaction_id: input.razorpayPaymentId,
+  });
+
+  if (error) {
+    throw new Error(error.message || 'Order could not be finalized after payment verification.');
+  }
+
+  const result = asRecord(data);
+
+  // Persist gateway IDs + allowed payment_method. Never write payment_method = 'razorpay'.
+  await admin
+    .from('payments')
+    .update({
+      payment_method: artisanPaymentMethod,
+      upi_app: input.razorpayOrderId,
+      transaction_id: input.razorpayPaymentId,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('order_id', input.artisanOrderId);
+
+  result.payment_method = artisanPaymentMethod;
+  result.razorpay_order_id = input.razorpayOrderId;
+  result.razorpay_payment_id = input.razorpayPaymentId;
+  result.transaction_id = input.razorpayPaymentId;
+
+  try {
+    await ensureShipmentsForPaidOrder(admin, input.artisanOrderId);
+  } catch (shipmentError) {
+    console.error('[marketplace-checkout] shipment_prep_failed', {
+      orderId: input.artisanOrderId,
+      message: readError(shipmentError),
+    });
+  }
+
+  let sellerNotifications: Array<Record<string, unknown>> = [];
+  try {
+    sellerNotifications = await notifySellersForPaidOrder(admin, input.artisanOrderId);
+  } catch (notifyError) {
+    console.error('[marketplace-checkout] seller_notify_failed', {
+      orderId: input.artisanOrderId,
+      message: readError(notifyError),
+    });
+  }
+
+  return {
+    idempotent: Boolean(result.idempotent),
+    result,
+    sellerNotifications,
+  };
+};
+
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders });
@@ -322,12 +453,99 @@ serve(async (req) => {
     const supabaseUrl = Deno.env.get('SUPABASE_URL') || '';
     const anonKey = Deno.env.get('SUPABASE_ANON_KEY') || '';
     const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
-    const authorization = req.headers.get('Authorization') || '';
 
     if (!supabaseUrl || !anonKey || !serviceRoleKey) {
       return json({ error: 'Server configuration is incomplete.' }, 500);
     }
 
+    const admin = createClient(supabaseUrl, serviceRoleKey);
+    const razorpaySignatureHeader = req.headers.get('x-razorpay-signature');
+
+    // Razorpay webhooks are unauthenticated; verify X-Razorpay-Signature instead.
+    if (razorpaySignatureHeader && !req.headers.get('Authorization')) {
+      const webhookSecret = Deno.env.get('RAZORPAY_WEBHOOK_SECRET') || '';
+      if (!webhookSecret) {
+        return json({ error: 'Razorpay webhook is not configured.' }, 503);
+      }
+
+      const rawBody = await req.text();
+      const valid = await verifyWebhookSignature({
+        rawBody,
+        signature: razorpaySignatureHeader,
+        webhookSecret,
+      });
+      if (!valid) {
+        return json({ error: 'Invalid webhook signature.' }, 400);
+      }
+
+      const event = asRecord(JSON.parse(rawBody));
+      const eventType = toStringValue(event.event) || '';
+      if (eventType !== 'payment.captured' && eventType !== 'order.paid') {
+        return json({ success: true, ignored: true, event: eventType });
+      }
+
+      const payload = asRecord(event.payload);
+      const paymentEntity = asRecord(asRecord(payload.payment).entity);
+      const razorpayPaymentId = toStringValue(paymentEntity.id);
+      const razorpayOrderId = toStringValue(paymentEntity.order_id);
+      const paymentAmountPaise = Math.round(toNumber(paymentEntity.amount));
+      const paymentCurrency = (toStringValue(paymentEntity.currency) || '').toUpperCase();
+      const paymentStatus = toStringValue(paymentEntity.status) || '';
+
+      if (!razorpayPaymentId || !razorpayOrderId) {
+        return json({ error: 'Webhook payment payload incomplete.' }, 400);
+      }
+      if (paymentCurrency !== 'INR') {
+        return json({ error: 'Unsupported payment currency.' }, 400);
+      }
+      if (!isSuccessfulRazorpayPaymentStatus(paymentStatus, Boolean(paymentEntity.captured))) {
+        return json({ success: true, ignored: true, status: paymentStatus });
+      }
+
+      const { data: paymentRow, error: paymentLookupError } = await admin
+        .from('payments')
+        .select('id, order_id, buyer_id, amount, status, upi_app, transaction_id')
+        .eq('upi_app', razorpayOrderId)
+        .maybeSingle();
+      if (paymentLookupError) throw paymentLookupError;
+      if (!paymentRow) {
+        return json({ error: 'No ARTISAN payment matches this Razorpay order.' }, 404);
+      }
+
+      const paymentRecord = asRecord(paymentRow);
+      const artisanOrderId = toStringValue(paymentRecord.order_id);
+      const buyerId = toStringValue(paymentRecord.buyer_id);
+      if (!artisanOrderId || !buyerId) {
+        return json({ error: 'Payment record is incomplete.' }, 400);
+      }
+
+      const expectedPaise = inrToPaise(toNumber(paymentRecord.amount));
+      if (expectedPaise !== paymentAmountPaise) {
+        console.error('[marketplace-checkout] webhook_amount_mismatch', {
+          artisanOrderId,
+          expectedPaise,
+          paymentAmountPaise,
+        });
+        return json({ error: 'Payment amount does not match the ARTISAN order.' }, 400);
+      }
+
+      const fulfilled = await fulfillVerifiedRazorpayPayment(admin, {
+        artisanOrderId,
+        buyerId,
+        razorpayOrderId,
+        razorpayPaymentId,
+        paymentMethod: mapRazorpayInstrumentToPaymentMethod(toStringValue(paymentEntity.method)),
+      });
+
+      return json({
+        success: true,
+        source: 'webhook',
+        idempotent: fulfilled.idempotent,
+        result: fulfilled.result,
+      });
+    }
+
+    const authorization = req.headers.get('Authorization') || '';
     if (!authorization) {
       return json({ error: 'Missing authorization.' }, 401);
     }
@@ -343,7 +561,6 @@ serve(async (req) => {
 
     const body = asRecord(await req.json());
     const action = toStringValue(body.action);
-    const admin = createClient(supabaseUrl, serviceRoleKey);
 
     if (action === 'create_order') {
       const itemsRaw = Array.isArray(body.items) ? body.items : [];
@@ -491,7 +708,7 @@ serve(async (req) => {
       );
       if (itemsError) throw itemsError;
 
-      const transactionId = `MOCK-UPI-${globalThis.crypto.randomUUID().replace(/-/g, '').slice(0, 16).toUpperCase()}`;
+      const transactionId = null;
       const { data: payment, error: paymentError } = await admin
         .from('payments')
         .insert({
@@ -503,7 +720,7 @@ serve(async (req) => {
           amount: totalAmount,
           status: 'pending',
         })
-        .select('id, status, amount, transaction_id, payment_method')
+        .select('id, status, amount, transaction_id, payment_method, upi_app')
         .single();
 
       if (paymentError) throw paymentError;
@@ -568,59 +785,192 @@ serve(async (req) => {
       return json({ success: true, order, items: items || [], payment, products });
     }
 
-    if (action === 'process_payment') {
+    if (action === 'create_razorpay_order') {
       const orderId = toStringValue(body.orderId) || toStringValue(body.order_id);
-      const mockOutcome = toStringValue(body.mockOutcome) || toStringValue(body.mock_outcome);
-      const upiApp = toStringValue(body.upiApp) || toStringValue(body.upi_app);
-      const upiId = toStringValue(body.upiId) || toStringValue(body.upi_id);
-      const transactionId = toStringValue(body.transactionId) || toStringValue(body.transaction_id);
-
       if (!orderId) return json({ error: 'Order id is required.' }, 400);
-      if (!mockOutcome || !['success', 'failed', 'pending'].includes(mockOutcome)) {
-        return json({ error: 'A valid mock payment outcome is required.' }, 400);
+
+      const { keyId, keySecret } = readRazorpayCredentials();
+
+      const { data: order, error: orderError } = await admin
+        .from('orders')
+        .select('id, buyer_id, status, total_amount, stock_deducted')
+        .eq('id', orderId)
+        .maybeSingle();
+      if (orderError) throw orderError;
+      if (!order || asRecord(order).buyer_id !== userId) {
+        return json({ error: 'Order not found.' }, 404);
       }
 
-      const { data, error } = await admin.rpc('finalize_mock_upi_payment', {
-        p_order_id: orderId,
-        p_buyer_id: userId,
-        p_outcome: mockOutcome,
-        p_upi_app: upiApp,
-        p_upi_id: upiId,
-        p_transaction_id: transactionId,
+      const orderRecord = asRecord(order);
+      if (Boolean(orderRecord.stock_deducted)) {
+        return json({ error: 'This order has already been fulfilled.' }, 400);
+      }
+
+      const { data: payment, error: paymentError } = await admin
+        .from('payments')
+        .select('id, status, amount, transaction_id, upi_app, payment_method')
+        .eq('order_id', orderId)
+        .maybeSingle();
+      if (paymentError) throw paymentError;
+      if (!payment) return json({ error: 'Payment record not found.' }, 404);
+
+      const paymentRecord = asRecord(payment);
+      if (toStringValue(paymentRecord.status)?.toLowerCase() === 'success') {
+        return json({ error: 'This order is already paid.' }, 400);
+      }
+
+      const amountInr = toNumber(paymentRecord.amount ?? orderRecord.total_amount);
+      if (amountInr <= 0) {
+        return json({ error: 'This order has no payable amount.' }, 400);
+      }
+      const amountPaise = inrToPaise(amountInr);
+
+      const existingRazorpayOrderId = toStringValue(paymentRecord.upi_app);
+      if (existingRazorpayOrderId && existingRazorpayOrderId.startsWith('order_')) {
+        return json({
+          success: true,
+          reused: true,
+          keyId,
+          razorpayOrderId: existingRazorpayOrderId,
+          amount: amountInr,
+          amountPaise,
+          currency: 'INR',
+          artisanOrderId: orderId,
+        });
+      }
+
+      const razorpayOrder = await createRazorpayOrder({
+        keyId,
+        keySecret,
+        amountPaise,
+        receipt: orderId,
+        notes: {
+          artisan_order_id: orderId,
+          buyer_id: userId,
+        },
       });
 
-      if (error) {
-        return json({ error: error.message || 'Payment could not be processed.' }, 400);
+      if (!razorpayOrder.id || razorpayOrder.amount !== amountPaise || razorpayOrder.currency !== 'INR') {
+        return json({ error: 'Razorpay order could not be created with the expected amount.' }, 502);
       }
 
-      const result = asRecord(data);
-      const paymentStatus = toStringValue(result.payment_status)?.toLowerCase();
-      if (paymentStatus === 'success') {
-        try {
-          await ensureShipmentsForPaidOrder(admin, orderId);
-        } catch (shipmentError) {
-          console.error('[marketplace-checkout] shipment_prep_failed', {
-            orderId,
-            message: readError(shipmentError),
-          });
-          // Payment already succeeded — do not roll back the order for shipment side effects.
-        }
+      const { error: updateError } = await admin
+        .from('payments')
+        .update({
+          payment_method: 'upi',
+          upi_app: razorpayOrder.id,
+          status: 'pending',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', toStringValue(paymentRecord.id) || '');
 
-        // Seller email is a best-effort side effect. Failures must never fail the order.
-        let sellerNotifications: Array<Record<string, unknown>> = [];
-        try {
-          sellerNotifications = await notifySellersForPaidOrder(admin, orderId);
-        } catch (notifyError) {
-          console.error('[marketplace-checkout] seller_notify_failed', {
-            orderId,
-            message: readError(notifyError),
-          });
-        }
+      if (updateError) throw updateError;
 
-        return json({ success: true, result: data, sellerNotifications });
+      return json({
+        success: true,
+        reused: false,
+        keyId,
+        razorpayOrderId: razorpayOrder.id,
+        amount: amountInr,
+        amountPaise,
+        currency: 'INR',
+        artisanOrderId: orderId,
+      });
+    }
+
+    if (action === 'verify_razorpay_payment') {
+      const orderId = toStringValue(body.orderId) || toStringValue(body.order_id);
+      const razorpayOrderId = toStringValue(body.razorpayOrderId) || toStringValue(body.razorpay_order_id);
+      const razorpayPaymentId = toStringValue(body.razorpayPaymentId) || toStringValue(body.razorpay_payment_id);
+      const razorpaySignature = toStringValue(body.razorpaySignature) || toStringValue(body.razorpay_signature);
+
+      if (!orderId || !razorpayOrderId || !razorpayPaymentId || !razorpaySignature) {
+        return json({ error: 'Payment verification details are incomplete.' }, 400);
       }
 
-      return json({ success: true, result: data, sellerNotifications: [] });
+      const { keyId, keySecret } = readRazorpayCredentials();
+
+      const { data: order, error: orderError } = await admin
+        .from('orders')
+        .select('id, buyer_id, status, total_amount, stock_deducted')
+        .eq('id', orderId)
+        .maybeSingle();
+      if (orderError) throw orderError;
+      if (!order || asRecord(order).buyer_id !== userId) {
+        return json({ error: 'Order not found.' }, 404);
+      }
+
+      const { data: payment, error: paymentError } = await admin
+        .from('payments')
+        .select('id, status, amount, transaction_id, upi_app, payment_method')
+        .eq('order_id', orderId)
+        .maybeSingle();
+      if (paymentError) throw paymentError;
+      if (!payment) return json({ error: 'Payment record not found.' }, 404);
+
+      const paymentRecord = asRecord(payment);
+      const storedRazorpayOrderId = toStringValue(paymentRecord.upi_app);
+
+      if (!storedRazorpayOrderId || storedRazorpayOrderId !== razorpayOrderId) {
+        return json({ error: 'Razorpay order does not match this ARTISAN payment.' }, 400);
+      }
+
+      const signatureOk = await verifyCheckoutPaymentSignature({
+        orderId: razorpayOrderId,
+        paymentId: razorpayPaymentId,
+        signature: razorpaySignature,
+        keySecret,
+      });
+      if (!signatureOk) {
+        return json({ error: 'Payment signature verification failed.' }, 400);
+      }
+
+      const remotePayment = await fetchRazorpayPayment({
+        keyId,
+        keySecret,
+        paymentId: razorpayPaymentId,
+      });
+
+      if (remotePayment.order_id !== razorpayOrderId) {
+        return json({ error: 'Razorpay payment does not belong to the expected order.' }, 400);
+      }
+      if ((remotePayment.currency || '').toUpperCase() !== 'INR') {
+        return json({ error: 'Payment currency mismatch.' }, 400);
+      }
+
+      const expectedPaise = inrToPaise(toNumber(paymentRecord.amount));
+      if (Math.round(remotePayment.amount) !== expectedPaise) {
+        return json({ error: 'Payment amount does not match the ARTISAN order total.' }, 400);
+      }
+
+      if (!isSuccessfulRazorpayPaymentStatus(remotePayment.status, remotePayment.captured)) {
+        return json({ error: 'Razorpay payment is not captured yet.' }, 400);
+      }
+
+      // Ignore any client-supplied amounts — only server/payment record amounts are trusted.
+      void body.amount;
+      void body.amountPaise;
+
+      const fulfilled = await fulfillVerifiedRazorpayPayment(admin, {
+        artisanOrderId: orderId,
+        buyerId: userId,
+        razorpayOrderId,
+        razorpayPaymentId,
+        paymentMethod: mapRazorpayInstrumentToPaymentMethod(remotePayment.method),
+      });
+
+      return json({
+        success: true,
+        result: fulfilled.result,
+        sellerNotifications: fulfilled.sellerNotifications,
+        idempotent: fulfilled.idempotent,
+      });
+    }
+
+    if (action === 'process_payment') {
+      return json({
+        error: 'Mock UPI payment has been replaced by Razorpay. Use create_razorpay_order and verify_razorpay_payment.',
+      }, 410);
     }
 
     if (action === 'retry_payment') {
@@ -635,6 +985,18 @@ serve(async (req) => {
       if (error) {
         return json({ error: error.message || 'Payment could not be reset.' }, 400);
       }
+
+      // Clear prior Razorpay order reference so a fresh Razorpay order can be created on retry.
+      await admin
+        .from('payments')
+        .update({
+          upi_app: null,
+          transaction_id: null,
+          payment_method: 'upi',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('order_id', orderId)
+        .eq('buyer_id', userId);
 
       return json({ success: true, result: data });
     }

@@ -13,6 +13,7 @@ The application expects these client-safe values in `.env`:
 
 - `VITE_SUPABASE_URL`
 - `VITE_SUPABASE_ANON_KEY`
+- `VITE_RAZORPAY_KEY_ID` (optional; Razorpay Key ID is also returned by the checkout edge function)
 
 Provider credentials must never use a `VITE_` prefix. Keep them in Supabase Edge Function secrets:
 
@@ -28,6 +29,29 @@ Provider credentials must never use a `VITE_` prefix. Keep them in Supabase Edge
 - `RESEND_API_KEY` (optional; required to send seller purchase emails)
 - `EMAIL_FROM` or `SELLER_NOTIFY_FROM` (optional From address for seller emails)
 - `APP_BASE_URL` (optional public site URL used in seller dashboard email links)
+- `RAZORPAY_KEY_ID` (required for checkout; Test Mode key first)
+- `RAZORPAY_KEY_SECRET` (required; server-side only — never use a `VITE_` prefix)
+- `RAZORPAY_WEBHOOK_SECRET` (optional; required only when Razorpay webhooks are enabled)
+
+### Razorpay checkout
+
+Buyer payments use Razorpay Standard Checkout via the `marketplace-checkout` edge function:
+
+1. `create_order` — creates the ARTISAN order + pending payment (`payment_method = 'upi'`; Razorpay is the gateway)
+2. `create_razorpay_order` — creates a Razorpay Order server-side for that amount (INR paise)
+3. Browser opens Razorpay Checkout (Key ID + Razorpay Order ID only)
+4. `verify_razorpay_payment` — HMAC signature check + Razorpay payment fetch + amount match, then existing stock/shipment/seller-email finalization
+
+On success, `payments.transaction_id` stores the Razorpay Payment ID. `payment_method` remains an allowed instrument (`upi`, or `card` / `netbanking` when Razorpay reports those). Never write `payment_method = 'razorpay'`.
+
+Optional webhook: point Razorpay Dashboard to your `marketplace-checkout` function URL and enable `payment.captured` (and optionally `order.paid`). The function verifies `X-Razorpay-Signature` with `RAZORPAY_WEBHOOK_SECRET`.
+
+Deploy after setting secrets:
+
+```bash
+supabase secrets set RAZORPAY_KEY_ID=rzp_test_... RAZORPAY_KEY_SECRET=...
+supabase functions deploy marketplace-checkout
+```
 
 ## Supabase
 

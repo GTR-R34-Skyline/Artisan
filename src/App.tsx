@@ -14,7 +14,7 @@ const ProductDetailPage = lazy(() => import('./pages/ProductDetailPage'));
 const CraftsmanPage = lazy(() => import('./pages/CraftsmanPage'));
 const CartPage = lazy(() => import('./pages/CartPage'));
 const CheckoutPage = lazy(() => import('./pages/CheckoutPage'));
-const MockUpiPaymentPage = lazy(() => import('./pages/MockUpiPaymentPage'));
+const PaymentCheckoutPage = lazy(() => import('./pages/PaymentCheckoutPage'));
 const OrderConfirmationPage = lazy(() => import('./pages/OrderConfirmationPage'));
 const VendorRegistration = lazy(() => import('./components/VendorRegistration'));
 const VendorDashboard = lazy(() => import('./components/VendorDashboard'));
@@ -51,7 +51,7 @@ const AppContent: React.FC = () => {
           <Route path="/marketplace/:productId" element={<ProductDetailPage />} />
           <Route path="/cart" element={<CartPage />} />
           <Route path="/checkout" element={<CheckoutPage />} />
-          <Route path="/checkout/payment/:orderId" element={<MockUpiPaymentPage />} />
+          <Route path="/checkout/payment/:orderId" element={<PaymentCheckoutPage />} />
           <Route path="/checkout/confirmation/:orderId" element={<OrderConfirmationPage />} />
           <Route path="/craftsman/:id" element={<CraftsmanPage />} />
           <Route path="/login" element={<Login />} />

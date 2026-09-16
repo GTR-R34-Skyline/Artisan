@@ -215,6 +215,11 @@ async function main() {
     }),
   });
   const payJson = await payRes.json();
+  if (payRes.status === 410 || String(payJson.error || '').toLowerCase().includes('razorpay')) {
+    fail(
+      'Mock process_payment is disabled. Complete payment via Razorpay Test Mode (create_razorpay_order + verify_razorpay_payment), then re-run seller notification checks against a paid order.',
+    );
+  }
   if (!payRes.ok || !payJson.success) {
     fail(`process_payment failed: ${JSON.stringify(payJson)}`);
   }
